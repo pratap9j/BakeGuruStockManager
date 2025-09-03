@@ -1,346 +1,280 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import os
 from fpdf import FPDF
-import requests
-from io import BytesIO
-from PIL import Image
+import os
 from datetime import datetime
 
-# ==============================
-# Database Setup
-# ==============================
-DB_FILE = "bakeguru.db"
-
+# ============== DATABASE SETUP ===================
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect("bakeguru_stock.db")
     c = conn.cursor()
 
-    # Inventory Table
+    # Products Table
     c.execute("""
-    CREATE TABLE IF NOT EXISTS inventory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sku TEXT UNIQUE,
-        name TEXT,
-        category TEXT,
-        subcategory TEXT,
-        price REAL,
-        stock INTEGER,
-        image_url TEXT
-    )
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sku TEXT UNIQUE,
+            name TEXT,
+            category TEXT,
+            subcategory TEXT,
+            price REAL,
+            stock INTEGER,
+            image_url TEXT
+        )
     """)
 
     # Quotes Table
     c.execute("""
-    CREATE TABLE IF NOT EXISTS quotes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        quote_no TEXT,
-        date TEXT,
-        customer_name TEXT,
-        customer_company TEXT,
-        customer_address TEXT,
-        customer_phone TEXT,
-        items TEXT,
-        total REAL
-    )
+        CREATE TABLE IF NOT EXISTS quotes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            quote_no TEXT,
+            date TEXT,
+            customer_name TEXT,
+            company TEXT,
+            address TEXT,
+            phone TEXT,
+            items TEXT,
+            total REAL
+        )
     """)
+
     conn.commit()
     conn.close()
 
 init_db()
 
-# ==============================
-# Export Functions
-# ==============================
-from openpyxl import Workbook, load_workbook
-from openpyxl.drawing.image import Image as XLImage
+# ============== HEADER ===================
+def app_header():
+    col1, col2 = st.columns([1, 6])
+    with col1:
+        if os.path.exists("logo.png"):
+            st.image("logo.png", width=60)
+    with col2:
+        st.markdown("<h1 style='margin-bottom:0;'>BakeGuru Stock Manager</h1>", unsafe_allow_html=True)
+    st.markdown("---")
 
-def export_quote_excel(df, qno, name, company, addr, phone, total):
-    os.makedirs("exports", exist_ok=True)
-    file_path = f"exports/{qno}.xlsx"
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Quote"
-
-    # Headers
-    headers = ["SKU", "Name", "Qty", "Price", "Total", "Image"]
-    ws.append(headers)
-
-    for idx, row in df.iterrows():
-        ws.append([
-            row["sku"],
-            row["name"],
-            row["qty"],
-            row["price"],
-            row["qty"] * row["price"],
-            ""  # placeholder for image
-        ])
-
-        # Insert image if exists
-        if row["image_url"]:
-            try:
-                resp = requests.get(row["image_url"], timeout=5)
-                img = Image.open(BytesIO(resp.content))
-                img.thumbnail((60, 60))
-                temp_file = f"temp_excel_{row['id']}.png"
-                img.save(temp_file)
-
-                img_xl = XLImage(temp_file)
-                ws.add_image(img_xl, f"F{idx+2}")  # Column F, row idx+2
-                os.remove(temp_file)
-            except:
-                pass
-
-    # Add customer info at the bottom
-    ws.append([])
-    ws.append(["Customer:", name])
-    ws.append(["Company:", company])
-    ws.append(["Address:", addr])
-    ws.append(["Phone:", phone])
-    ws.append([])
-    ws.append(["Grand Total", total])
-
-    wb.save(file_path)
-    return file_path
-
-
-def export_quote_pdf(df, qno, name, company, addr, phone, total):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(200, 10, "BakeGuru Quote", ln=True, align="C")
-
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(200, 10, f"Quote No: {qno}", ln=True)
-    pdf.cell(200, 10, f"Customer: {name}, {company}", ln=True)
-    pdf.cell(200, 10, f"Address: {addr}", ln=True)
-    pdf.cell(200, 10, f"Phone: {phone}", ln=True)
-
-    pdf.ln(10)
-    pdf.set_font("Arial", "B", 10)
-    pdf.cell(25, 8, "SKU", 1, align="C")
-    pdf.cell(40, 8, "Name", 1, align="C")
-    pdf.cell(20, 8, "Qty", 1, align="C")
-    pdf.cell(25, 8, "Price", 1, align="C")
-    pdf.cell(25, 8, "Total", 1, align="C")
-    pdf.cell(40, 8, "Image", 1, ln=True, align="C")
-
-    pdf.set_font("Arial", "", 10)
-
-    for _, row in df.iterrows():
-        pdf.cell(25, 20, str(row["sku"]), 1)
-        pdf.cell(40, 20, str(row["name"]), 1)
-        pdf.cell(20, 20, str(row["qty"]), 1, align="C")
-        pdf.cell(25, 20, f"{row['price']:.2f}", 1, align="R")
-        pdf.cell(25, 20, f"{row['qty'] * row['price']:.2f}", 1, align="R")
-
-        if row["image_url"]:
-            try:
-                resp = requests.get(row["image_url"], timeout=5)
-                img = Image.open(BytesIO(resp.content))
-                img.thumbnail((30, 30))
-                temp_file = f"temp_{row['id']}.png"
-                img.save(temp_file)
-
-                x = pdf.get_x()
-                y = pdf.get_y()
-                pdf.cell(40, 20, "", 1)  # placeholder
-                pdf.image(temp_file, x=x+5, y=y+2, w=30, h=16)
-                os.remove(temp_file)
-            except:
-                pdf.cell(40, 20, "N/A", 1, align="C")
-        else:
-            pdf.cell(40, 20, "N/A", 1, align="C")
-
-        pdf.ln(20)
-
-    pdf.ln(5)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(200, 10, f"Grand Total: {total:.2f}", ln=True, align="R")
-
-    os.makedirs("exports", exist_ok=True)
-    file_path = f"exports/{qno}.pdf"
-    pdf.output(file_path)
-    return file_path
-
-# ==============================
-# Streamlit App
-# ==============================
-st.set_page_config(page_title="BakeGuru Stock Manager", layout="wide")
-
-menu = ["Inventory", "Add Stock", "Quote Builder", "Quotes History", "Dashboard"]
-choice = st.sidebar.radio("Navigation", menu)
-
-# ------------------------------
-# Inventory View
-# ------------------------------
-if choice == "Inventory":
-    st.title("📦 Inventory List")
-
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql("SELECT * FROM inventory", conn)
-    conn.close()
-
-    if not df.empty:
-        search = st.text_input("🔎 Search (SKU / Name / Category)")
-        if search:
-            df = df[df.apply(lambda row: row.astype(str).str.contains(search, case=False).any(), axis=1)]
-
-        st.dataframe(df[["sku", "name", "category", "subcategory", "price", "stock", "image_url"]])
-    else:
-        st.info("No products found. Please add stock.")
-
-# ------------------------------
-# Add Stock
-# ------------------------------
-elif choice == "Add Stock":
-    st.title("➕ Add / Upload Stock")
+# ============== ADD STOCK ===================
+def add_stock():
+    app_header()
+    st.subheader("📦 Add New Stock")
 
     with st.form("add_stock_form"):
-        sku = st.text_input("SKU")
-        name = st.text_input("Name")
-        cat = st.text_input("Category")
-        subcat = st.text_input("Subcategory")
-        price = st.number_input("Price", min_value=0.0)
-        stock = st.number_input("Stock", min_value=0)
-        image_url = st.text_input("Image URL")
+        col1, col2 = st.columns(2)
+        with col1:
+            sku = st.text_input("SKU")
+            name = st.text_input("Product Name")
+            category = st.text_input("Category")
+            subcategory = st.text_input("Subcategory")
+        with col2:
+            price = st.number_input("Price", min_value=0.0, step=0.01)
+            stock = st.number_input("Stock Qty", min_value=0, step=1)
+            image_url = st.text_input("Image URL (optional)")
 
-        submitted = st.form_submit_button("Add Stock")
+        submitted = st.form_submit_button("Add Product")
+
         if submitted:
-            conn = sqlite3.connect(DB_FILE)
+            conn = sqlite3.connect("bakeguru_stock.db")
+            c = conn.cursor()
             try:
-                conn.execute("INSERT INTO inventory (sku,name,category,subcategory,price,stock,image_url) VALUES (?,?,?,?,?,?,?)",
-                             (sku, name, cat, subcat, price, stock, image_url))
+                c.execute("INSERT INTO products (sku, name, category, subcategory, price, stock, image_url) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                          (sku, name, category, subcategory, price, stock, image_url))
                 conn.commit()
-                st.success("✅ Stock Added")
-            except Exception as e:
-                st.error(f"Error: {e}")
+                st.success(f"✅ Product '{name}' added successfully!")
+            except sqlite3.IntegrityError:
+                st.error("❌ SKU already exists!")
             conn.close()
 
-    st.subheader("📤 Bulk Upload via Excel")
-    file_upload = st.file_uploader("Upload Excel file", type=["xlsx"])
-    if file_upload:
-        df_upload = pd.read_excel(file_upload)
-        conn = sqlite3.connect(DB_FILE)
-        df_upload.to_sql("inventory", conn, if_exists="append", index=False)
-        conn.close()
-        st.success("✅ Bulk upload complete!")
+# ============== VIEW INVENTORY ===================
+def view_inventory():
+    app_header()
+    st.subheader("📋 Inventory List")
 
-# ------------------------------
-# Quote Builder
-# ------------------------------
-elif choice == "Quote Builder":
-    st.title("📝 Quote Builder")
+    search = st.text_input("🔍 Search by SKU or Name")
 
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql("SELECT * FROM inventory", conn)
+    conn = sqlite3.connect("bakeguru_stock.db")
+    df = pd.read_sql_query("SELECT * FROM products", conn)
     conn.close()
 
-    if not df.empty:
-        if "quote_cart" not in st.session_state:
-            st.session_state["quote_cart"] = []
+    if search:
+        df = df[df["sku"].str.contains(search, case=False) | df["name"].str.contains(search, case=False)]
 
-        st.subheader("Select Products")
-        search = st.text_input("🔎 Search Products")
-        if search:
-            df = df[df.apply(lambda row: row.astype(str).str.contains(search, case=False).any(), axis=1)]
+    if df.empty:
+        st.warning("No products found.")
+        return
 
-        for _, row in df.iterrows():
-            col1, col2, col3, col4, col5 = st.columns([2,3,2,2,2])
-            with col1:
-                st.write(row["sku"])
-            with col2:
-                st.write(row["name"])
-            with col3:
-                qty = st.number_input(f"Qty_{row['id']}", min_value=0, step=1, key=f"qty_{row['id']}")
-            with col4:
-                st.write(f"₹{row['price']}")
-            with col5:
-                if st.button("Add to Quote", key=f"add_{row['id']}"):
-                    if qty > 0:
-                        st.session_state["quote_cart"].append({**row, "qty": qty})
-                        st.success(f"Added {row['name']} (x{qty})")
+    # Table with images and selection
+    st.markdown("### Product List")
+    for _, row in df.iterrows():
+        col1, col2, col3, col4, col5, col6 = st.columns([1, 2, 2, 2, 1, 1])
+        with col1:
+            if row["image_url"]:
+                st.image(row["image_url"], width=50)
+            else:
+                st.write("📦")
+        with col2:
+            st.write(f"**{row['sku']}**")
+        with col3:
+            st.write(row["name"])
+        with col4:
+            st.write(f"₹{row['price']}")
+        with col5:
+            st.write(f"{row['stock']} in stock")
+        with col6:
+            if st.button("➕ Add to Quote", key=f"addq_{row['id']}"):
+                if "quote_cart" not in st.session_state:
+                    st.session_state.quote_cart = []
+                if row["id"] not in [item["id"] for item in st.session_state.quote_cart]:
+                    st.session_state.quote_cart.append(row.to_dict())
+                    st.success(f"Added {row['name']} to quote.")
 
-        if st.session_state["quote_cart"]:
-            st.subheader("🛒 Current Quote Cart")
-            cart_df = pd.DataFrame(st.session_state["quote_cart"])
-            st.dataframe(cart_df[["sku","name","qty","price","image_url"]])
+# ============== QUOTE GENERATION ===================
+def export_quote_pdf(df, customer, filename="quote.pdf"):
+    pdf = FPDF()
+    pdf.add_page()
 
-            if st.button("Generate Quote"):
-                name = st.text_input("Customer Name")
-                company = st.text_input("Company")
-                addr = st.text_area("Address")
-                phone = st.text_input("Phone")
+    # Add Logo
+    if os.path.exists("logo.png"):
+        pdf.image("logo.png", x=10, y=8, w=25)  # Top-left logo
 
-                if st.button("Finalize & Save Quote"):
-                    today = datetime.today().strftime("%Y-%m-%d")
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute("SELECT COUNT(*) FROM quotes")
-                    qno = c.fetchone()[0] + 1
-                    qid = f"BG-{qno:04d}"
+    # Title
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(200, 10, "BakeGuru Stock Manager - Quote", ln=True, align="C")
+    pdf.ln(20)
 
-                    items_json = pd.DataFrame(st.session_state["quote_cart"]).to_json(orient="records")
-                    total = sum([item["qty"] * item["price"] for item in st.session_state["quote_cart"]])
+    # Customer Info
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(200, 10, f"Customer: {customer['name']}", ln=True)
+    pdf.cell(200, 10, f"Company: {customer['company']}", ln=True)
+    pdf.cell(200, 10, f"Phone: {customer['phone']}", ln=True)
+    pdf.multi_cell(200, 10, f"Address: {customer['address']}")
+    pdf.ln(10)
 
-                    c.execute("""INSERT INTO quotes (quote_no,date,customer_name,customer_company,customer_address,customer_phone,items,total)
-                              VALUES (?,?,?,?,?,?,?,?)""",
-                              (qid, today, name, company, addr, phone, items_json, total))
-                    conn.commit()
-                    conn.close()
+    # Table Header
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(30, 10, "Image", 1)
+    pdf.cell(30, 10, "SKU", 1)
+    pdf.cell(50, 10, "Product", 1)
+    pdf.cell(20, 10, "Qty", 1)
+    pdf.cell(30, 10, "Price", 1)
+    pdf.cell(30, 10, "Total", 1)
+    pdf.ln()
 
-                    pdf_file = export_quote_pdf(pd.DataFrame(st.session_state["quote_cart"]), qid, name, company, addr, phone, total)
-                    excel_file = export_quote_excel(pd.DataFrame(st.session_state["quote_cart"]), qid, name, company, addr, phone, total)
+    # Items
+    pdf.set_font("Arial", "", 10)
+    grand_total = 0
+    for _, row in df.iterrows():
+        qty = int(row.get("quote_qty", 1))
+        total = qty * row["price"]
+        grand_total += total
 
-                    st.success(f"✅ Quote {qid} saved!")
-                    st.download_button("📥 Download PDF", open(pdf_file,"rb"), file_name=f"{qid}.pdf")
-                    st.download_button("📥 Download Excel", open(excel_file,"rb"), file_name=f"{qid}.xlsx")
+        # Image
+        if row["image_url"] and os.path.exists(row["image_url"]):
+            x_before = pdf.get_x()
+            y_before = pdf.get_y()
+            pdf.multi_cell(30, 10, "", 1)  # reserve cell space
+            pdf.image(row["image_url"], x=x_before + 2, y=y_before + 2, w=15, h=15)
+            pdf.set_xy(x_before + 30, y_before)
+        else:
+            pdf.cell(30, 10, "N/A", 1)
 
-                    st.session_state["quote_cart"] = []
+        pdf.cell(30, 10, str(row["sku"]), 1)
+        pdf.cell(50, 10, str(row["name"]), 1)
+        pdf.cell(20, 10, str(qty), 1)
+        pdf.cell(30, 10, f"₹{row['price']}", 1)
+        pdf.cell(30, 10, f"₹{total}", 1)
+        pdf.ln()
 
-    else:
-        st.warning("No products in stock.")
+    # Grand Total
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(160, 10, "Grand Total", 1)
+    pdf.cell(30, 10, f"₹{grand_total}", 1)
+    pdf.ln(20)
 
-# ------------------------------
-# Quotes History
-# ------------------------------
-elif choice == "Quotes History":
-    st.title("📜 Quotes History")
+    # Disclaimer
+    pdf.set_font("Arial", "I", 10)
+    pdf.multi_cell(200, 10, "Note: GST & Shipping extra.")
 
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql("SELECT * FROM quotes", conn)
+    pdf.output(filename)
+    return filename
+
+def generate_quote():
+    app_header()
+    st.subheader("🧾 Generate Quote")
+
+    if "quote_cart" not in st.session_state or not st.session_state.quote_cart:
+        st.warning("No products added to quote.")
+        return
+
+    df = pd.DataFrame(st.session_state.quote_cart)
+    df["quote_qty"] = df["quote_qty"] if "quote_qty" in df else 1
+
+    edited_df = st.data_editor(
+        df[["sku", "name", "price", "stock"]],
+        column_config={
+            "sku": "SKU",
+            "name": "Product",
+            "price": "Price",
+            "stock": "Available Stock",
+        },
+        num_rows="dynamic",
+        key="quote_editor"
+    )
+
+    # Customer Info
+    with st.form("customer_form"):
+        st.write("### Customer Info")
+        customer_name = st.text_input("Customer Name")
+        customer_company = st.text_input("Company")
+        customer_phone = st.text_input("Phone")
+        customer_address = st.text_area("Address")
+
+        submitted = st.form_submit_button("Generate Quote")
+        if submitted:
+            customer = {
+                "name": customer_name,
+                "company": customer_company,
+                "phone": customer_phone,
+                "address": customer_address
+            }
+            filename = export_quote_pdf(edited_df, customer)
+            st.success("✅ Quote generated successfully!")
+            with open(filename, "rb") as f:
+                st.download_button("📥 Download PDF", f, file_name=filename)
+
+# ============== DASHBOARD ===================
+def dashboard():
+    app_header()
+    st.subheader("📊 Dashboard Overview")
+
+    conn = sqlite3.connect("bakeguru_stock.db")
+    products = pd.read_sql_query("SELECT * FROM products", conn)
     conn.close()
 
-    if not df.empty:
-        st.dataframe(df[["quote_no","date","customer_name","total"]])
-    else:
-        st.info("No quotes found.")
+    total_skus = len(products)
+    total_in_stock = products["stock"].sum()
+    total_out_of_stock = len(products[products["stock"] == 0])
 
-# ------------------------------
-# Dashboard
-# ------------------------------
-elif choice == "Dashboard":
-    st.title("📊 Dashboard")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total SKUs", total_skus)
+    col2.metric("Total In Stock", total_in_stock)
+    col3.metric("Out of Stock", total_out_of_stock)
 
-    conn = sqlite3.connect(DB_FILE)
-    inv_df = pd.read_sql("SELECT * FROM inventory", conn)
-    q_df = pd.read_sql("SELECT * FROM quotes", conn)
-    conn.close()
+# ============== MAIN APP ===================
+def main():
+    st.set_page_config(page_title="BakeGuru Stock Manager", layout="wide")
 
-    if not inv_df.empty:
-        st.metric("Total SKUs", len(inv_df))
-        st.metric("Total In Stock", inv_df["stock"].sum())
-        st.metric("Out of Stock SKUs", (inv_df["stock"]==0).sum())
-        st.write(inv_df.groupby("category")["sku"].count())
-    else:
-        st.info("No inventory data.")
+    menu = ["Dashboard", "Add Stock", "Inventory", "Quotes"]
+    choice = st.sidebar.selectbox("Navigation", menu)
 
-    if not q_df.empty:
-        st.metric("Total Quotes", len(q_df))
-        q_df["date"] = pd.to_datetime(q_df["date"])
-        st.line_chart(q_df.groupby(q_df["date"].dt.to_period("M")).size())
-    else:
-        st.info("No quotes data.")
+    if choice == "Dashboard":
+        dashboard()
+    elif choice == "Add Stock":
+        add_stock()
+    elif choice == "Inventory":
+        view_inventory()
+    elif choice == "Quotes":
+        generate_quote()
 
+if __name__ == "__main__":
+    main()
