@@ -147,7 +147,6 @@ def export_excel(df, filename="inventory.xlsx"):
 
 def export_quote_pdf(products, filename="quote.pdf", customer=None, quote_no=None, date=None):
     company = get_company_settings()
-
     pdf = FPDF()
     pdf.add_page()
 
@@ -236,8 +235,8 @@ if "logged_in" not in st.session_state:
 # --- Login Page ---
 if not st.session_state.logged_in:
     st.title("🔑 BakeGuru Stock Manager Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+    username = st.text_input("Username", key="login_user")
+    password = st.text_input("Password", type="password", key="login_pass")
 
     if st.button("Login"):
         user = verify_user(username, password)
@@ -340,18 +339,18 @@ else:
     # --- Add Product ---
     elif choice == "Add Product":
         st.subheader("➕ Add a New Product")
-        sku = st.text_input("Product SKU")
-        name = st.text_input("Product Name")
-        variation = st.text_input("Variation")
-        category = st.text_input("Category")
-        subcategory = st.text_input("Sub Category")
-        list_price = st.number_input("List Price", 0.0)
-        wholesale_price = st.number_input("Wholesale Price", 0.0)
-        retail_price = st.number_input("Retail Price", 0.0)
-        qty = st.number_input("Quantity", 0)
-        image_file = st.file_uploader("Upload Image", type=["jpg", "png"])
+        sku = st.text_input("Product SKU", key="add_sku")
+        name = st.text_input("Product Name", key="add_name")
+        variation = st.text_input("Variation", key="add_variation")
+        category = st.text_input("Category", key="add_category")
+        subcategory = st.text_input("Sub Category", key="add_subcategory")
+        list_price = st.number_input("List Price", 0.0, key="add_list_price")
+        wholesale_price = st.number_input("Wholesale Price", 0.0, key="add_wholesale_price")
+        retail_price = st.number_input("Retail Price", 0.0, key="add_retail_price")
+        qty = st.number_input("Quantity", 0, key="add_qty")
+        image_file = st.file_uploader("Upload Image", type=["jpg", "png"], key="add_image")
 
-        if st.button("Add Product"):
+        if st.button("Add Product", key="btn_add_product"):
             image_data = None
             if image_file is not None:
                 buf = io.BytesIO()
@@ -368,7 +367,7 @@ else:
         **Template Columns Required:**  
         - sku, name, variation, category, subcategory, list_price, wholesale_price, retail_price, qty, image_url  
         """)
-        uploaded_file = st.file_uploader("Upload Excel or CSV", type=["xlsx", "csv"])
+        uploaded_file = st.file_uploader("Upload Excel or CSV", type=["xlsx", "csv"], key="bulk_upload")
 
         if uploaded_file:
             try:
@@ -380,7 +379,7 @@ else:
                 st.write("Preview of uploaded file:")
                 st.dataframe(df_upload.head())
 
-                if st.button("Import Products"):
+                if st.button("Import Products", key="btn_import"):
                     imported_count = 0
                     for _, row in df_upload.iterrows():
                         image_data = None
@@ -415,8 +414,8 @@ else:
         if not df.empty:
             st.subheader("📋 Inventory List")
 
-            category_filter = st.selectbox("Filter by Category", ["All"] + sorted(df["category"].dropna().unique().tolist()))
-            search_text = st.text_input("Search by SKU or Name")
+            category_filter = st.selectbox("Filter by Category", ["All"] + sorted(df["category"].dropna().unique().tolist()), key="stock_category")
+            search_text = st.text_input("Search by SKU or Name", key="stock_search")
 
             if category_filter != "All":
                 df = df[df["category"] == category_filter]
@@ -440,7 +439,7 @@ else:
                     st.text(f"{row['qty']}")
 
             if selected_products:
-                if st.button("➡️ Generate Quote"):
+                if st.button("➡️ Generate Quote", key="btn_generate_quote"):
                     st.session_state["quote_ids"] = selected_products
                     st.session_state["step"] = "quote"
                     st.rerun()
@@ -456,10 +455,10 @@ else:
 
         # Customer Details
         st.subheader("👤 Customer Details (Optional)")
-        customer_name = st.text_input("Customer Name", "")
-        customer_company = st.text_input("Customer Company", "")
-        customer_address = st.text_area("Customer Address", "")
-        customer_phone = st.text_input("Customer Phone", "")
+        customer_name = st.text_input("Customer Name", "", key="cust_name")
+        customer_company = st.text_input("Customer Company", "", key="cust_company")
+        customer_address = st.text_area("Customer Address", "", key="cust_address")
+        customer_phone = st.text_input("Customer Phone", "", key="cust_phone")
 
         customer_info = None
         if customer_name or customer_company or customer_address or customer_phone:
@@ -478,12 +477,12 @@ else:
             with col2:
                 st.text(f"Available: {row['qty']}")
             with col3:
-                selected_df.loc[i, "quote_qty"] = st.number_input(f"Quote Qty {row['id']}", min_value=1, value=1)
+                selected_df.loc[i, "quote_qty"] = st.number_input(f"Quote Qty {row['id']}", min_value=1, value=1, key=f"quote_qty_{row['id']}")
             with col4:
-                selected_df.loc[i, "retail_price"] = st.number_input(f"Price {row['id']}", min_value=0.0, value=float(row["retail_price"]))
+                selected_df.loc[i, "retail_price"] = st.number_input(f"Price {row['id']}", min_value=0.0, value=float(row["retail_price"]), key=f"price_{row['id']}")
 
         # Export Quote
-        if st.button("⬇️ Save & Export Quote"):
+        if st.button("⬇️ Save & Export Quote", key="btn_export_quote"):
             quote_number = get_next_quote_number()
             today = datetime.date.today().strftime("%d-%m-%Y")
             grand_total = (selected_df["quote_qty"] * selected_df["retail_price"]).sum()
@@ -511,7 +510,7 @@ else:
         if not quotes_df.empty:
             st.dataframe(quotes_df[["quote_no", "date", "customer_name", "customer_company", "grand_total"]])
 
-            selected_quote = st.selectbox("Select Quote to View", quotes_df["quote_no"].tolist())
+            selected_quote = st.selectbox("Select Quote to View", quotes_df["quote_no"].tolist(), key="select_quote")
             if selected_quote:
                 q = quotes_df[quotes_df["quote_no"] == selected_quote].iloc[0]
                 st.write(f"**Customer:** {q['customer_name']} ({q['customer_company']})")
@@ -521,7 +520,7 @@ else:
                 products = pd.read_json(q["products"])
                 st.table(products[["sku", "name", "quote_qty", "retail_price"]])
 
-                if st.button("⬇️ Download PDF Again"):
+                if st.button("⬇️ Download PDF Again", key="btn_redownload_pdf"):
                     customer_info = {
                         "name": q["customer_name"],
                         "company": q["customer_company"],
@@ -540,19 +539,25 @@ else:
     # --- User Management ---
     elif choice == "User Management":
         st.subheader("👥 User Management")
-        new_user = st.text_input("New Username")
-        new_pass = st.text_input("New Password", type="password")
-        role = st.selectbox("Role", ["Admin", "Staff", "Viewer"])
 
-        if st.button("Add User"):
+        # Add User
+        new_user = st.text_input("New Username", key="um_new_user")
+        new_pass = st.text_input("New Password", type="password", key="um_new_pass")
+        role = st.selectbox("Role", ["Admin", "Staff", "Viewer"], key="um_role")
+
+        if st.button("Add User", key="btn_add_user"):
             if create_user(new_user, new_pass, role):
                 st.success(f"✅ User {new_user} created with role {role}")
             else:
                 st.error("❌ Username already exists")
 
-        reset_user = st.text_input("Reset Password for User")
-        reset_new_pass = st.text_input("New Password", type="password")
-        if st.button("Reset Password"):
+        st.divider()
+
+        # Reset Password
+        reset_user = st.text_input("Reset Password for User", key="um_reset_user")
+        reset_new_pass = st.text_input("New Password", type="password", key="um_reset_pass")
+
+        if st.button("Reset Password", key="btn_reset_pass"):
             reset_password(reset_user, reset_new_pass)
             st.success("✅ Password reset")
 
@@ -561,17 +566,17 @@ else:
         st.subheader("⚙️ Company Settings")
         settings = get_company_settings()
 
-        name = st.text_input("Company Name", settings["name"])
-        address = st.text_area("Address", settings["address"])
-        phone = st.text_input("Phone", settings["phone"])
-        email = st.text_input("Email", settings["email"])
+        name = st.text_input("Company Name", settings["name"], key="settings_name")
+        address = st.text_area("Address", settings["address"], key="settings_address")
+        phone = st.text_input("Phone", settings["phone"], key="settings_phone")
+        email = st.text_input("Email", settings["email"], key="settings_email")
 
-        logo_file = st.file_uploader("Upload Logo", type=["png", "jpg", "jpeg"])
+        logo_file = st.file_uploader("Upload Logo", type=["png", "jpg", "jpeg"], key="settings_logo")
         logo_data = None
         if logo_file:
             logo_data = logo_file.read()
             st.image(logo_data, width=150)
 
-        if st.button("Save Settings"):
+        if st.button("Save Settings", key="btn_save_settings"):
             update_company_settings(name, address, phone, email, logo_data)
             st.success("✅ Company settings updated")
