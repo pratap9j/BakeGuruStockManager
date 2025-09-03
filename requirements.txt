@@ -1,0 +1,6 @@
+streamlit
+pandas
+pillow
+openpyxl
+fpdf2
+sqlite3-binary
