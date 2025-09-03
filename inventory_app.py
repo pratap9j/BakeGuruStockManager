@@ -53,19 +53,56 @@ init_db()
 # ==============================
 # Export Functions
 # ==============================
+from openpyxl import Workbook, load_workbook
+from openpyxl.drawing.image import Image as XLImage
+
 def export_quote_excel(df, qno, name, company, addr, phone, total):
     os.makedirs("exports", exist_ok=True)
     file_path = f"exports/{qno}.xlsx"
-    with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Quote")
-        ws = writer.sheets["Quote"]
-        ws.append([])
-        ws.append(["Customer:", name])
-        ws.append(["Company:", company])
-        ws.append(["Address:", addr])
-        ws.append(["Phone:", phone])
-        ws.append([])
-        ws.append(["Grand Total", total])
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Quote"
+
+    # Headers
+    headers = ["SKU", "Name", "Qty", "Price", "Total", "Image"]
+    ws.append(headers)
+
+    for idx, row in df.iterrows():
+        ws.append([
+            row["sku"],
+            row["name"],
+            row["qty"],
+            row["price"],
+            row["qty"] * row["price"],
+            ""  # placeholder for image
+        ])
+
+        # Insert image if exists
+        if row["image_url"]:
+            try:
+                resp = requests.get(row["image_url"], timeout=5)
+                img = Image.open(BytesIO(resp.content))
+                img.thumbnail((60, 60))
+                temp_file = f"temp_excel_{row['id']}.png"
+                img.save(temp_file)
+
+                img_xl = XLImage(temp_file)
+                ws.add_image(img_xl, f"F{idx+2}")  # Column F, row idx+2
+                os.remove(temp_file)
+            except:
+                pass
+
+    # Add customer info at the bottom
+    ws.append([])
+    ws.append(["Customer:", name])
+    ws.append(["Company:", company])
+    ws.append(["Address:", addr])
+    ws.append(["Phone:", phone])
+    ws.append([])
+    ws.append(["Grand Total", total])
+
+    wb.save(file_path)
     return file_path
 
 
@@ -306,3 +343,4 @@ elif choice == "Dashboard":
         st.line_chart(q_df.groupby(q_df["date"].dt.to_period("M")).size())
     else:
         st.info("No quotes data.")
+
