@@ -38,7 +38,6 @@ _db_lock = threading.Lock()
 
 @contextmanager
 def db_conn(readonly: bool = False):
-    """Context-managed SQLite connection with WAL, timeouts & retries."""
     abs_db = os.path.abspath(DB_PATH)
     uri = f"file:{abs_db}?mode={'ro' if readonly else 'rwc'}"
     con = sqlite3.connect(uri, uri=True, timeout=30, isolation_level=None, check_same_thread=False)
@@ -110,7 +109,7 @@ with db_conn(False) as con:
     con.executescript(SCHEMA)
 
 # =============================
-# Image Helpers (file-cached thumbs + data URLs)
+# Image Helpers
 # =============================
 
 def _pil_to_data_url(img: Image.Image, ext: str = "JPEG") -> str:
@@ -119,12 +118,6 @@ def _pil_to_data_url(img: Image.Image, ext: str = "JPEG") -> str:
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     mime = "image/jpeg" if ext.upper() == "JPEG" else f"image/{ext.lower()}"
     return f"data:{mime};base64,{b64}"
-
-
-def _save_thumb(img: Image.Image, basename: str) -> str:
-    path = os.path.join(THUMB_DIR, f"{basename}.jpg")
-    img.convert("RGB").save(path, format="JPEG", quality=85)
-    return path
 
 
 def ensure_thumb_from_url(url: str, key: str, size=(120, 120), refresh: bool = False) -> Tuple[Optional[str], Optional[str]]:
@@ -155,7 +148,7 @@ def ensure_thumb_from_url(url: str, key: str, size=(120, 120), refresh: bool = F
 
 
 # =============================
-# PDF (FPDF2) Quote Builder
+# PDF Quote Builder
 # =============================
 class QuotePDF(FPDF):
     def header(self):
@@ -178,11 +171,115 @@ def _pdf_output_bytes(pdf: FPDF) -> bytes:
     return out
 
 
+def render_quote_pdf(meta: dict, items: pd.DataFrame) -> bytes:
+    """Build a compact quote PDF with image first in each row.
+    Expects `items` to have columns: sku, name, qty, price, image_url (optional), thumb_path (optional).
+    """
+    pdf = QuotePDF()
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.add_page()
+
+    # Header meta
+    pdf.set_font("helvetica", size=12)
+    pdf.cell(0, 8, f"Quote No: {meta.get('qno','')}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 8, f"Customer: {meta.get('name','')} | {meta.get('company','')}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 8, f"Phone: {meta.get('phone','')}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(2)
+
+    # Narrow columns
+    col_w = {"img": 18, "sku": 28, "name": 68, "qty": 16, "price": 18, "total": 20}
+    pdf.set_font("helvetica", "B", 10)
+    pdf.cell(col_w["img"], 8, "Img", border=1, align="C")
+    pdf.cell(col_w["sku"], 8, "SKU", border=1)
+    pdf.cell(col_w["name"], 8, "Name", border=1)
+    pdf.cell(col_w["qty"], 8, "Qty", border=1, align="R")
+    pdf.cell(col_w["price"], 8, "Price", border=1, align="R")
+    pdf.cell(col_w["total"], 8, "Total", border=1, align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    pdf.set_font("helvetica", size=9)
+    total = 0.0
+
+    def row_height_for(name: str) -> int:
+        lines = max(1, (len(name) // 40) + 1)
+        return 20 if lines > 1 else 14
+
+    for _, r in items.iterrows():
+        qty = int(r.get("qty", 0) or 0)
+        price = float(r.get("price", 0) or 0)
+        line_total = qty * price
+        total += line_total
+
+        rh = row_height_for(str(r.get("name", "")))
+        y0 = pdf.get_y(); x0 = pdf.get_x()
+
+        # Image first
+        pdf.cell(col_w["img"], rh, "", border=1)
+        img_path = r.get("thumb_path")
+        if not img_path and r.get("image_url"):
+            key = r.get("sku") or hashlib.sha1(str(r.get("image_url")).encode()).hexdigest()[:10]
+            _, img_path = ensure_thumb_from_url(str(r.get("image_url")), f"{key}_pdf")
+        if img_path:
+            try:
+                pdf.image(img_path, x=x0 + 1.5, y=y0 + 1.5, w=col_w["img"] - 3)
+            except Exception:
+                pass
+        pdf.set_xy(x0 + col_w["img"], y0)
+
+        # Rest of row
+        pdf.cell(col_w["sku"], rh, str(r.get("sku", ""))[:14], border=1)
+        x1 = pdf.get_x(); y1 = pdf.get_y()
+        pdf.multi_cell(col_w["name"], 6, str(r.get("name", "")), border=1)
+        pdf.set_xy(x1 + col_w["name"], y0)
+        pdf.cell(col_w["qty"], rh, str(qty), border=1, align="R")
+        pdf.cell(col_w["price"], rh, f"{price:.2f}", border=1, align="R")
+        pdf.cell(col_w["total"], rh, f"{line_total:.2f}", border=1, align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    pdf.set_font("helvetica", "B", 11)
+    pdf.cell(0, 10, f"Grand Total: {total:.2f}", align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font("helvetica", "I", 9)
+    pdf.cell(0, 7, "Prices are exclusive of taxes, unless specified.")
+
+    return _pdf_output_bytes(pdf).encode("latin1")
+    return out
+
+
 # =============================
 # Streamlit UI
 # =============================
 st.set_page_config(page_title=APP_TITLE, page_icon="📦", layout="wide")
 st.title(APP_TITLE)
+
+# ---- Draft Quote helpers (session state) ----
+if "draft_cart" not in st.session_state:
+    st.session_state["draft_cart"] = pd.DataFrame(columns=["sku","name","price","qty","image_url","thumb_path"])  # empty
+
+def _ensure_thumb_for_row(row: dict) -> Optional[str]:
+    url = (row.get("image_url") or "").strip()
+    if not url:
+        return None
+    key = (row.get("sku") or hashlib.sha1(str(row).encode()).hexdigest()[:10])
+    _, tpath = ensure_thumb_from_url(url, key)
+    return tpath
+
+
+def add_to_draft(df_rows: pd.DataFrame):
+    """Add selected rows to the draft quote (merge by SKU, default qty=1)."""
+    draft = st.session_state["draft_cart"].copy()
+    for _, r in df_rows.iterrows():
+        sku = str(r.get("sku"))
+        name = str(r.get("name"))
+        price = float(r.get("price") or 0)
+        img_url = r.get("image_url")
+        tpath = _ensure_thumb_for_row({"sku": sku, "image_url": img_url})
+        if not draft.empty and (draft["sku"] == sku).any():
+            draft.loc[draft["sku"] == sku, "qty"] = draft.loc[draft["sku"] == sku, "qty"].astype(int) + 1
+            draft.loc[draft["sku"] == sku, ["price","image_url","thumb_path"]] = [price, img_url, tpath]
+        else:
+            draft = pd.concat([
+                draft,
+                pd.DataFrame([{ "sku": sku, "name": name, "price": price, "qty": 1, "image_url": img_url, "thumb_path": tpath }])
+            ], ignore_index=True)
+    st.session_state["draft_cart"] = draft
 
 with st.sidebar:
     choice = st.radio(
@@ -216,19 +313,84 @@ def page_dashboard():
 def page_view_stock():
     df = query_df("SELECT sku, name, category, subcategory, price, image_url, stock FROM products ORDER BY name")
 
+    colr1, colr2 = st.columns([1, 3])
+    with colr1:
+        refresh_thumbs = st.button("🔄 Refresh thumbs")
+    with colr2:
+        st.caption("Tip: tick rows and click 'Add to Draft' to build a quote.")
+
+    # Build thumbnails
+    thumb_dataurls, thumb_paths = [], []
+    for _, r in df.iterrows():
+        sku = (r["sku"] or "").strip() or hashlib.sha1(str(r.to_dict()).encode()).hexdigest()[:10]
+        durl, fpath = (None, None)
+        url = (r["image_url"] or "").strip()
+        if url:
+            durl, fpath = ensure_thumb_from_url(url, sku, refresh=refresh_thumbs)
+        thumb_dataurls.append(durl)
+        thumb_paths.append(fpath)
+    df.insert(1, "thumb", thumb_dataurls)
+    df.insert(2, "thumb_path", thumb_paths)
+
+    # Add checkbox column for selection
+    df.insert(0, "select", False)
+
+    edited = st.data_editor(
+        df[["select", "thumb", "sku", "name", "category", "subcategory", "price", "stock", "image_url"]],
+        column_config={
+            "select": st.column_config.CheckboxColumn("✓", help="Select to add to draft"),
+            "thumb": st.column_config.ImageColumn("Img", width="small"),
+            "sku": st.column_config.TextColumn("SKU", width="small"),
+            "name": st.column_config.TextColumn("Name", width="medium"),
+            "category": st.column_config.TextColumn("Cat", width="small"),
+            "subcategory": st.column_config.TextColumn("Subcat", width="small"),
+            "price": st.column_config.NumberColumn("Price", format="₹%.2f", width="small"),
+            "stock": st.column_config.NumberColumn("Stock", width="small"),
+            "image_url": st.column_config.TextColumn("Image URL", width="medium"),
+        },
+        hide_index=True,
+        num_rows="dynamic",
+        width="stretch",
+    )
+
+    cA, cB = st.columns([1, 1])
+    with cA:
+        if st.button("➕ Add to Draft Quote"):
+            sel = edited[edited["select"] == True]
+            if sel.empty:
+                st.info("No rows selected.")
+            else:
+                draft_prev = st.session_state.get("draft_quote", pd.DataFrame(columns=["sku","name","price","qty","image_url","thumb_path"]))
+                add = sel[["sku","name","price","image_url","thumb_path"]].copy()
+                add["qty"] = 1
+                combined = pd.concat([draft_prev, add], ignore_index=True)
+                combined = combined.groupby(["sku","name","price","image_url","thumb_path"], dropna=False, as_index=False)["qty"].sum()
+                st.session_state["draft_quote"] = combined
+                st.success(f"Added {len(sel)} item(s) to draft.")
+    with cB:
+        if st.button("💾 Save Changes"):
+            for _, r in edited.iterrows():
+                exec_sql(
+                    """
+                    UPDATE products SET name=?, category=?, subcategory=?, price=?, stock=?, image_url=? WHERE sku=?
+                    """,
+                    (r["name"], r["category"], r["subcategory"], float(r["price"] or 0), int(r["stock"] or 0), (r["image_url"] or None), r["sku"]),
+                )
+            st.success("Changes saved."):
+    df = query_df("SELECT sku, name, category, subcategory, price, image_url, stock FROM products ORDER BY name")
+
     colr1, _ = st.columns([1, 6])
     with colr1:
         refresh_thumbs = st.button("🔄 Refresh thumbs")
 
-    thumb_dataurls = []
-    thumb_paths = []
+    thumb_dataurls, thumb_paths = [], []
     for _, r in df.iterrows():
         sku = (r["sku"] or "").strip() or hashlib.sha1(str(r.to_dict()).encode()).hexdigest()[:10]
-        dataurl, fpath = (None, None)
+        durl, fpath = (None, None)
         url = (r["image_url"] or "").strip()
         if url:
-            dataurl, fpath = ensure_thumb_from_url(url, sku, refresh=refresh_thumbs)
-        thumb_dataurls.append(dataurl)
+            durl, fpath = ensure_thumb_from_url(url, sku, refresh=refresh_thumbs)
+        thumb_dataurls.append(durl)
         thumb_paths.append(fpath)
     df.insert(1, "thumb", thumb_dataurls)
     df.insert(2, "thumb_path", thumb_paths)
@@ -236,7 +398,7 @@ def page_view_stock():
     edited = st.data_editor(
         df[["thumb", "sku", "name", "category", "subcategory", "price", "stock", "image_url"]],
         column_config={
-            "thumb": st.column_config.ImageColumn("Img", help="Product image", width="small"),
+            "thumb": st.column_config.ImageColumn("Img", width="small"),
             "sku": st.column_config.TextColumn("SKU", width="small"),
             "name": st.column_config.TextColumn("Name", width="medium"),
             "category": st.column_config.TextColumn("Cat", width="small"),
@@ -254,16 +416,19 @@ def page_view_stock():
         for _, r in edited.iterrows():
             exec_sql(
                 """
-                UPDATE products
-                SET name=?, category=?, subcategory=?, price=?, stock=?, image_url=?
-                WHERE sku=?
+                UPDATE products SET name=?, category=?, subcategory=?, price=?, stock=?, image_url=? WHERE sku=?
                 """,
-                (
-                    r["name"], r["category"], r["subcategory"], float(r["price"] or 0), int(r["stock"] or 0),
-                    (r["image_url"] or None), r["sku"]
-                )
+                (r["name"], r["category"], r["subcategory"], float(r["price"] or 0), int(r["stock"] or 0), (r["image_url"] or None), r["sku"]),
             )
         st.success("Changes saved.")
+
+    # Add to Quote draft
+    selected = st.multiselect("Select products to add to draft quote", df["name"].tolist())
+    if st.button("➕ Add to Draft Quote") and selected:
+        draft = df[df["name"].isin(selected)].copy().reset_index(drop=True)
+        draft["qty"] = 1
+        st.session_state["draft_quote"] = draft
+        st.success(f"Added {len(draft)} products to draft quote.")
 
 
 # ---------- Add Stock ----------
@@ -272,43 +437,24 @@ def page_add_stock():
     st.subheader("Add / Update Product")
     with st.form("add_form"):
         c1, c2, c3, c4, c5 = st.columns([1, 2, 1, 1, 1])
-        with c1:
-            sku = st.text_input("SKU *", placeholder="SKU-001")
-        with c2:
-            name = st.text_input("Name *", placeholder="Paper Cake Box 8x8")
-        with c3:
-            category = st.text_input("Category", placeholder="Packaging")
-        with c4:
-            subcategory = st.text_input("Subcat", placeholder="Cake Box")
-        with c5:
-            price = st.number_input("Price", min_value=0.0, step=0.5)
-
-        c6, c7 = st.columns([2, 2])
-        with c6:
-            image_url = st.text_input("Image URL", placeholder="https://...")
-        with c7:
-            stock = st.number_input("Stock", min_value=0, step=1)
-
+        sku = c1.text_input("SKU *", placeholder="SKU-001")
+        name = c2.text_input("Name *", placeholder="Paper Cake Box 8x8")
+        category = c3.text_input("Category", placeholder="Packaging")
+        subcategory = c4.text_input("Subcat", placeholder="Cake Box")
+        price = c5.number_input("Price", min_value=0.0, step=0.5)
+        image_url = st.text_input("Image URL", placeholder="https://...")
+        stock = st.number_input("Stock", min_value=0, step=1)
         submitted = st.form_submit_button("Add / Update")
-
     if submitted:
         if not sku or not name:
             st.error("SKU and Name are required")
             return
-
         exec_sql(
-            """
-            INSERT INTO products (sku, name, category, subcategory, price, image_url, stock)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(sku) DO UPDATE SET
-              name=excluded.name,
-              category=excluded.category,
-              subcategory=excluded.subcategory,
-              price=excluded.price,
-              image_url=excluded.image_url,
-              stock=excluded.stock
-            """,
-            (sku.strip(), name.strip(), category.strip(), subcategory.strip(), float(price), image_url.strip(), int(stock))
+            """INSERT INTO products (sku, name, category, subcategory, price, image_url, stock)
+            VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(sku) DO UPDATE SET
+            name=excluded.name, category=excluded.category, subcategory=excluded.subcategory,
+            price=excluded.price, image_url=excluded.image_url, stock=excluded.stock""",
+            (sku.strip(), name.strip(), category.strip(), subcategory.strip(), float(price), image_url.strip(), int(stock)),
         )
         st.success("Product saved.")
 
@@ -317,72 +463,66 @@ def page_add_stock():
 
 def page_quote_builder():
     st.subheader("Quote Builder")
-    df = query_df("SELECT sku, name, price, image_url FROM products ORDER BY name")
-
-    pick = st.multiselect("Select items", df["name"].tolist())
-    if pick:
+    if "draft_quote" in st.session_state:
+        cart = st.session_state["draft_quote"].copy()
+    else:
+        df = query_df("SELECT sku, name, price, image_url FROM products ORDER BY name")
+        pick = st.multiselect("Select items", df["name"].tolist())
+        if not pick:
+            return
         cart = df[df["name"].isin(pick)].copy().reset_index(drop=True)
         cart["qty"] = 1
 
-        durls, tpaths = [], []
-        for _, r in cart.iterrows():
-            sku = (r["sku"] or "").strip() or hashlib.sha1(str(r.to_dict()).encode()).hexdigest()[:10]
-            durl, tpath = (None, None)
-            if r["image_url"]:
-                durl, tpath = ensure_thumb_from_url(r["image_url"], f"{sku}_q")
-            durls.append(durl)
-            tpaths.append(tpath)
-        cart.insert(0, "thumb", durls)
-        cart["thumb_path"] = tpaths
+    durls, tpaths = [], []
+    for _, r in cart.iterrows():
+        sku = (r["sku"] or "").strip() or hashlib.sha1(str(r.to_dict()).encode()).hexdigest()[:10]
+        durl, tpath = (None, None)
+        if r["image_url"]:
+            durl, tpath = ensure_thumb_from_url(r["image_url"], f"{sku}_q")
+        durls.append(durl)
+        tpaths.append(tpath)
+    cart.insert(0, "thumb", durls)
+    cart["thumb_path"] = tpaths
 
-        cart = st.data_editor(
-            cart[["thumb", "sku", "name", "price", "qty", "image_url"]],
-            column_config={
-                "thumb": st.column_config.ImageColumn("Img", width="small"),
-                "sku": st.column_config.TextColumn("SKU", width="small"),
-                "name": st.column_config.TextColumn("Name", width="medium"),
-                "price": st.column_config.NumberColumn("Price", format="₹%.2f", width="small"),
-                "qty": st.column_config.NumberColumn("Qty", min_value=1, step=1, width="small"),
-                "image_url": st.column_config.TextColumn("Image URL", width="medium"),
-            },
-            hide_index=True,
-            width="stretch",
-        )
+    cart = st.data_editor(
+        cart[["thumb", "sku", "name", "price", "qty", "image_url"]],
+        column_config={
+            "thumb": st.column_config.ImageColumn("Img", width="small"),
+            "sku": st.column_config.TextColumn("SKU", width="small"),
+            "name": st.column_config.TextColumn("Name", width="medium"),
+            "price": st.column_config.NumberColumn("Price", format="₹%.2f", width="small"),
+            "qty": st.column_config.NumberColumn("Qty", min_value=1, step=1, width="small"),
+            "image_url": st.column_config.TextColumn("Image URL", width="medium"),
+        },
+        hide_index=True,
+        width="stretch",
+    )
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            qno = st.text_input("Quote No", value=f"Q{datetime.now():%Y%m%d-%H%M}")
-        with c2:
-            cname = st.text_input("Customer Name")
-        with c3:
-            comp = st.text_input("Company")
-        phone = st.text_input("Phone")
+    c1, c2, c3 = st.columns(3)
+    qno = c1.text_input("Quote No", value=f"Q{datetime.now():%Y%m%d-%H%M}")
+    cname = c2.text_input("Customer Name")
+    comp = c3.text_input("Company")
+    phone = st.text_input("Phone")
 
-        if st.button("📄 Generate PDF"):
-            meta = {"qno": qno, "name": cname, "company": comp, "phone": phone}
-            try:
-                pdf_bytes = render_quote_pdf(meta, cart)
-                st.session_state["last_pdf"] = (qno, pdf_bytes)
-                st.success("PDF generated.")
-            except Exception as e:
-                st.error(f"PDF generation failed: {e}")
+    if st.button("📄 Generate PDF"):
+        meta = {"qno": qno, "name": cname, "company": comp, "phone": phone}
+        try:
+            pdf_bytes = render_quote_pdf(meta, cart)
+            st.session_state["last_pdf"] = (qno, pdf_bytes)
+            st.success("PDF generated.")
+        except Exception as e:
+            st.error(f"PDF generation failed: {e}")
 
-        if "last_pdf" in st.session_state:
-            last_qno, last_bytes = st.session_state["last_pdf"]
-            st.download_button(
-                "⬇️ Download Quote PDF",
-                data=last_bytes,
-                file_name=f"{last_qno}.pdf",
-                mime="application/pdf",
-                key="download_pdf_btn",
-            )
+    if "last_pdf" in st.session_state:
+        last_qno, last_bytes = st.session_state["last_pdf"]
+        st.download_button("⬇️ Download Quote PDF", data=last_bytes, file_name=f"{last_qno}.pdf", mime="application/pdf")
 
 
 # ---------- Quotes History ----------
 
 def page_quotes_history():
     h = query_df("SELECT id, qno, customer_name, company, phone, created_at FROM quotes ORDER BY id DESC")
-    st.dataframe(h, use_container_width=True)
+    st.dataframe(h, width='stretch')
 
 
 # ---------- Diagnostics ----------
@@ -421,3 +561,16 @@ def page_diagnostics():
     except Exception as e:
         st.error(f"PDF generation FAILED: {e}")
 
+# ---------- Router ----------
+if choice == "Dashboard":
+    page_dashboard()
+elif choice == "View Stock":
+    page_view_stock()
+elif choice == "Add Stock":
+    page_add_stock()
+elif choice == "Quote Builder":
+    page_quote_builder()
+elif choice == "Quotes History":
+    page_quotes_history()
+elif choice == "Diagnostics":
+    page_diagnostics()
