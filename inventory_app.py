@@ -15,7 +15,6 @@ import requests
 import streamlit as st
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
-import logging
 
 # =============================
 # App Constants & Paths
@@ -37,9 +36,6 @@ os.makedirs(THUMB_DIR, exist_ok=True)
 # =============================
 _db_lock = threading.Lock()
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 @contextmanager
 def db_conn(readonly: bool = False):
     """Context-managed SQLite connection with WAL, timeouts & retries."""
@@ -50,7 +46,6 @@ def db_conn(readonly: bool = False):
         con.execute("PRAGMA journal_mode=WAL;")
         con.execute("PRAGMA busy_timeout=30000;")
         con.execute("PRAGMA synchronous=NORMAL;")
-        con.execute("PRAGMA foreign_keys=ON;")   # enable FK enforcement
         yield con
     finally:
         con.close()
@@ -138,14 +133,12 @@ def ensure_thumb_from_path(path: str, key: str, size=(120, 120)) -> Tuple[Option
     try:
         if not os.path.exists(path):
             return None, None
-        with Image.open(path) as im:
-            im.thumbnail(size)
-            thumb_name = f"{key}_thumb"
-            thumb_path = _save_thumb(im, thumb_name)
-            dataurl = _pil_to_data_url(im, "JPEG")
-            return dataurl, thumb_path
-    except Exception as e:
-        logger.exception("ensure_thumb_from_path failed for %s: %s", path, e)
+        im = Image.open(path)
+        im.thumbnail(size)
+        thumb_name = f"{key}_thumb"
+        thumb_path = _save_thumb(im, thumb_name)
+        return _pil_to_data_url(im, "JPEG"), thumb_path
+    except Exception:
         return None, None
 
 
@@ -161,15 +154,8 @@ def ensure_thumb_from_url(url: str, key: str, size=(120, 120), refresh: bool = F
         cache_path = os.path.join(THUMB_DIR, f"{thumb_name}.jpg")
 
         if (not refresh) and os.path.exists(cache_path):
-            try:
-                with Image.open(cache_path) as im:
-                    return _pil_to_data_url(im, "JPEG"), cache_path
-            except Exception:
-                # corrupted cache -> remove and continue to fetch
-                try:
-                    os.remove(cache_path)
-                except Exception:
-                    pass
+            im = Image.open(cache_path)
+            return _pil_to_data_url(im, "JPEG"), cache_path
 
         # Simple retry loop for flaky URLs
         last_err = None
@@ -177,38 +163,28 @@ def ensure_thumb_from_url(url: str, key: str, size=(120, 120), refresh: bool = F
             try:
                 r = requests.get(url, timeout=10)
                 r.raise_for_status()
-                with Image.open(io.BytesIO(r.content)) as im:
-                    im.thumbnail(size)
-                    im.convert("RGB").save(cache_path, format="JPEG", quality=85)
-                    return _pil_to_data_url(im, "JPEG"), cache_path
+                im = Image.open(io.BytesIO(r.content))
+                im.thumbnail(size)
+                im.convert("RGB").save(cache_path, format="JPEG", quality=85)
+                return _pil_to_data_url(im, "JPEG"), cache_path
             except Exception as e:
                 last_err = e
                 time.sleep(0.4 * (attempt + 1))
         # Retries exhausted
         raise last_err if last_err else RuntimeError("unknown fetch error")
-    except Exception as e:
-        logger.exception("ensure_thumb_from_url failed for %s: %s", url, e)
+    except Exception:
         return None, None
 
 
 def save_uploaded_image(upload, sku: str) -> Optional[str]:
     try:
-        allowed = {".jpg", ".jpeg", ".png", ".webp"}
         ext = os.path.splitext(upload.name)[1].lower() or ".jpg"
-        if ext not in allowed:
-            logger.warning("Uploaded file has disallowed extension: %s", ext)
-            return None
-        buf = upload.getbuffer()
-        if len(buf) > 5 * 1024 * 1024:  # 5 MB limit
-            logger.warning("Uploaded file too large: %s bytes", len(buf))
-            return None
         safe = "".join(c for c in sku if c.isalnum() or c in ("-","_"))
         fpath = os.path.join(IMG_DIR, f"{safe}{ext}")
         with open(fpath, "wb") as f:
-            f.write(buf)
+            f.write(upload.getbuffer())
         return fpath
-    except Exception as e:
-        logger.exception("save_uploaded_image failed for sku=%s: %s", sku, e)
+    except Exception:
         return None
 
 
@@ -429,7 +405,8 @@ def page_add_stock():
         with c9:
             reorder = st.number_input("Reorder", min_value=0, step=1)
         with c10:
-            st.markdown("")  # spacer corrected
+            st.markdown("
+")
             submitted = st.form_submit_button("Add / Update")
 
     if submitted:
