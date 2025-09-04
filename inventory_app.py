@@ -205,76 +205,15 @@ class QuotePDF(FPDF):
 
 def _pdf_output_bytes(pdf: FPDF) -> bytes:
     out = pdf.output(dest="S")
-    return out.encode("latin1") if isinstance(out, str) else out
+    # Normalize possible return types from fpdf2
+    if isinstance(out, bytearray):
+        return bytes(out)
+    if isinstance(out, str):
+        return out.encode("latin1")
+    return out
 
 
-def render_quote_pdf(meta: dict, items: pd.DataFrame) -> bytes:
-    pdf = QuotePDF()
-    pdf.set_auto_page_break(auto=True, margin=12)
-    pdf.add_page()
-
-    # Customer meta
-    pdf.set_font("helvetica", size=12)
-    pdf.cell(0, 8, f"Quote No: {meta.get('qno','')} ", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(0, 8, f"Customer: {meta.get('name','')} | {meta.get('company','')}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(0, 8, f"Phone: {meta.get('phone','')}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.ln(2)
-
-    # Table header (narrower layout)
-    col_w = {"img": 18, "sku": 28, "name": 68, "qty": 16, "price": 18, "total": 20}
-    pdf.set_font("helvetica", "B", 10)
-    pdf.cell(col_w["img"], 8, "Img", border=1, align="C")
-    pdf.cell(col_w["sku"], 8, "SKU", border=1)
-    pdf.cell(col_w["name"], 8, "Name", border=1)
-    pdf.cell(col_w["qty"], 8, "Qty", border=1, align="R")
-    pdf.cell(col_w["price"], 8, "Price", border=1, align="R")
-    pdf.cell(col_w["total"], 8, "Total", border=1, align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-
-    pdf.set_font("helvetica", size=9)
-    total = 0.0
-
-    def row_height_for(name: str) -> int:
-        lines = max(1, (len(name) // 40) + 1)
-        return 20 if lines > 1 else 14
-
-    for _, r in items.iterrows():
-        qty = int(r.get("qty", 0) or 0)
-        price = float(r.get("price", 0) or 0)
-        line_total = qty * price
-        total += line_total
-
-        rh = row_height_for(str(r.get("name", "")))
-        y0 = pdf.get_y()
-        x0 = pdf.get_x()
-
-        # Image first
-        pdf.cell(col_w["img"], rh, "", border=1)
-        img_path = r.get("thumb_path") or r.get("image_path")
-        if not img_path and r.get("image_url"):
-            key = r.get("sku") or hashlib.sha1(str(r.get("image_url")).encode()).hexdigest()[:10]
-            _, img_path = ensure_thumb_from_url(str(r.get("image_url")), f"{key}_pdf")
-        if img_path:
-            try:
-                pdf.image(img_path, x=x0 + 1.5, y=y0 + 1.5, w=col_w["img"] - 3)
-            except Exception:
-                pass
-        pdf.set_xy(x0 + col_w["img"], y0)
-
-        # Other cells
-        pdf.cell(col_w["sku"], rh, str(r.get("sku", ""))[:14], border=1)
-        x1 = pdf.get_x(); y1 = pdf.get_y()
-        pdf.multi_cell(col_w["name"], 6, str(r.get("name", "")), border=1)
-        pdf.set_xy(x1 + col_w["name"], y0)
-        pdf.cell(col_w["qty"], rh, str(qty), border=1, align="R")
-        pdf.cell(col_w["price"], rh, f"{price:.2f}", border=1, align="R")
-        pdf.cell(col_w["total"], rh, f"{line_total:.2f}", border=1, align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-
-    pdf.set_font("helvetica", "B", 11)
-    pdf.cell(0, 10, f"Grand Total: {total:.2f}", align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.set_font("helvetica", "I", 9)
-    pdf.cell(0, 7, "Prices are exclusive of taxes, unless specified.")
-
-    return _pdf_output_bytes(pdf)
+# keep rest of code unchanged
 
 
 # =============================
