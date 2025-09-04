@@ -12,23 +12,23 @@ from PIL import Image
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 
-# =====================================
+# -----------------------------
 # App config
-# =====================================
+# -----------------------------
 st.set_page_config(page_title="BakeGuru Stock Manager", layout="wide")
 
 DB_FILE = "bakeguru.db"
 IMAGES_DIR = "images"
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
-# =====================================
-# DB init + safe migrations
-# =====================================
+# -----------------------------
+# DB init (safe migrations)
+# -----------------------------
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     c = conn.cursor()
-    c.execute(
-        """
+
+    c.execute("""
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sku TEXT UNIQUE,
@@ -40,10 +40,9 @@ def init_db():
             image_url TEXT,
             image_path TEXT
         )
-        """
-    )
-    c.execute(
-        """
+    """)
+
+    c.execute("""
         CREATE TABLE IF NOT EXISTS quotes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             quote_no TEXT,
@@ -55,23 +54,24 @@ def init_db():
             items TEXT,
             total REAL
         )
-        """
-    )
-    # Migrate: add columns if older DB exists
+    """)
+
+    # Migrate missing columns if DB is older
     def ensure_col(table, col, coltype):
         c.execute(f"PRAGMA table_info({table})")
         cols = [r[1] for r in c.fetchall()]
         if col not in cols:
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
     ensure_col("products", "image_path", "TEXT")
+
     conn.commit()
     return conn
 
 conn = init_db()
 
-# =====================================
+# -----------------------------
 # Header
-# =====================================
+# -----------------------------
 col1, col2 = st.columns([1, 6])
 with col1:
     st.markdown("### 📦")
@@ -83,20 +83,21 @@ with col2:
     )
 st.markdown("---")
 
-# =====================================
-# Sidebar (list)
-# =====================================
+# -----------------------------
+# Sidebar (list navigation)
+# -----------------------------
 st.sidebar.markdown("### 📂 Navigation")
 MENU = ["Dashboard", "View Stock", "Add Stock", "Quote Builder", "Quotes History"]
 choice = st.sidebar.radio("Go to", MENU, index=0)
 
-# =====================================
+# -----------------------------
 # Utils
-# =====================================
+# -----------------------------
 def load_products() -> pd.DataFrame:
     return pd.read_sql("SELECT * FROM products", conn)
 
 def safe_items_json(df: pd.DataFrame) -> str:
+    # Avoid ujson overflow / encoding issues
     return json.dumps(df.to_dict(orient="records"), ensure_ascii=False)
 
 def local_image_bytes(path: str):
@@ -108,20 +109,22 @@ def local_image_bytes(path: str):
             return None
     return None
 
-def pick_thumb(row) -> bytes | str | None:
+def pick_thumb(row):
     """
-    Prefer URL (Streamlit can render it natively).
-    If no URL, try local file bytes.
+    Prefer local image_path (bytes) so uploaded images show first.
+    Fallback to image_url; else None.
     """
+    path = (row.get("image_path") or "").strip()
+    if path and os.path.exists(path):
+        b = local_image_bytes(path)
+        if b:
+            return b
     url = (row.get("image_url") or "").strip()
-    if url:
-        return url
-    b = local_image_bytes(row.get("image_path") or "")
-    return b
+    return url if url else None
 
-# =====================================
+# -----------------------------
 # Exports (PDF & Excel)
-# =====================================
+# -----------------------------
 def export_quote_pdf(df, qno, name, company, addr, phone, total):
     pdf = FPDF()
     pdf.add_page()
@@ -186,8 +189,7 @@ def export_quote_pdf(df, qno, name, company, addr, phone, total):
             inserted = False
         pdf.ln(line_h)
 
-    # Grand Total under the "Total" column (not far right)
-    # Left margin default ~10 in FPDF. The "Total" column begins after SKU+Name+Qty+Price.
+    # Grand Total under the "Total" column (further left)
     x_total_col = pdf.l_margin + col_w["sku"] + col_w["name"] + col_w["qty"] + col_w["price"]
     pdf.ln(2)
     pdf.set_font("Arial", "B", 12)
@@ -228,7 +230,6 @@ def export_quote_excel(df, qno, name, company, addr, phone, total):
         ])
 
         # Try URL then local path
-        added = False
         url = (row.get("image_url") or "").strip()
         path = (row.get("image_path") or "").strip()
         try:
@@ -242,12 +243,10 @@ def export_quote_excel(df, qno, name, company, addr, phone, total):
                 xl_img.width, xl_img.height = 60, 60
                 ws.add_image(xl_img, f"F{excel_row}")
                 os.remove(tf)
-                added = True
             elif path and os.path.exists(path):
                 xl_img = XLImage(path)
                 xl_img.width, xl_img.height = 60, 60
                 ws.add_image(xl_img, f"F{excel_row}")
-                added = True
         except Exception:
             pass
 
@@ -275,9 +274,9 @@ def export_quote_excel(df, qno, name, company, addr, phone, total):
     wb.save(file_path)
     return file_path
 
-# =====================================
+# -----------------------------
 # Pages
-# =====================================
+# -----------------------------
 def page_dashboard():
     st.subheader("📊 Dashboard")
 
@@ -336,16 +335,16 @@ def page_view_stock():
     if low:
         f = f[f["stock"] < 5]
 
-    # Thumbnail column (URL or local bytes)
+    # Thumbnail column
     thumbs = f.apply(pick_thumb, axis=1)
     f = f.copy()
-    f.insert(1, "thumb", thumbs)  # after id/sku? We'll show columns explicitly
+    f.insert(1, "thumb", thumbs)
 
     st.markdown("### Products (inline editable)")
     edited = st.data_editor(
         f[["thumb", "sku", "name", "category", "subcategory", "price", "stock", "image_url", "image_path", "id"]],
         column_config={
-            "thumb": st.column_config.ImageColumn("Image", help="URL or local upload shown"),
+            "thumb": st.column_config.ImageColumn("Image", help="Local image (image_path) preferred, else URL"),
             "sku": st.column_config.TextColumn("SKU", disabled=True),
             "name": "Name",
             "category": "Category",
@@ -373,8 +372,83 @@ def page_view_stock():
                 )
             conn.commit()
             st.success("Changes saved.")
+            st.rerun()
         except Exception as e:
             st.error(f"Save failed: {e}")
+
+    # Image manager (set/replace/clear image_path)
+    st.markdown("### 🖼 Manage product image (image_path)")
+    left, right = st.columns([2, 3])
+    with left:
+        df_all = load_products()
+        if df_all.empty:
+            st.info("No products to manage.")
+            return
+        choices = [f"{r['sku']} — {r['name']}" for _, r in df_all.iterrows()]
+        choice_map = {f"{r['sku']} — {r['name']}": int(r["id"]) for _, r in df_all.iterrows()}
+        pick = st.selectbox("Pick a product", choices)
+
+    with right:
+        up = st.file_uploader("Upload JPG/PNG to set/replace image_path", type=["jpg", "jpeg", "png"],
+                              key="img_uploader_viewstock")
+
+    c1, c2, _ = st.columns([1, 1, 3])
+
+    with c1:
+        if st.button("Upload & Set"):
+            if not pick:
+                st.warning("Select a product first.")
+            elif up is None:
+                st.warning("Choose a file to upload.")
+            else:
+                try:
+                    pid = choice_map[pick]
+                    cur = conn.execute("SELECT sku, image_path FROM products WHERE id=?", (pid,))
+                    sku, old_path = cur.fetchone()
+                    safe_sku = "".join(ch for ch in sku if ch.isalnum() or ch in ("-", "_")).strip()
+                    ext = os.path.splitext(up.name)[1].lower() or ".jpg"
+                    fname = f"{safe_sku}_{int(datetime.now().timestamp())}{ext}"
+                    new_path = os.path.join(IMAGES_DIR, fname)
+
+                    img = Image.open(up).convert("RGB")
+                    img.save(new_path, "JPEG", quality=90)
+
+                    # delete old local image if existed
+                    try:
+                        if old_path and os.path.exists(old_path):
+                            os.remove(old_path)
+                    except Exception:
+                        pass
+
+                    conn.execute("UPDATE products SET image_path=? WHERE id=?", (new_path, pid))
+                    conn.commit()
+                    st.success(f"Image set for {pick}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to set image: {e}")
+
+    with c2:
+        if st.button("Clear image"):
+            if not pick:
+                st.warning("Select a product first.")
+            else:
+                try:
+                    pid = choice_map[pick]
+                    cur = conn.execute("SELECT image_path FROM products WHERE id=?", (pid,))
+                    (old_path,) = cur.fetchone()
+                    try:
+                        if old_path and os.path.exists(old_path):
+                            os.remove(old_path)
+                    except Exception:
+                        pass
+                    conn.execute("UPDATE products SET image_path='' WHERE id=?", (pid,))
+                    conn.commit()
+                    st.success(f"Cleared local image for {pick}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to clear image: {e}")
+
+    st.caption("Tip: Local image (image_path) is shown in thumbnails and exports when present; otherwise Image URL is used.")
 
 def page_add_stock():
     st.subheader("➕ Add Stock")
@@ -391,7 +465,6 @@ def page_add_stock():
             stock = st.number_input("Stock Quantity", min_value=0, step=1)
             image_url = st.text_input("Image URL (optional)")
 
-        # Image file uploader
         img_file = st.file_uploader("Or upload an image file (JPG/PNG)", type=["jpg", "jpeg", "png"])
 
         submitted = st.form_submit_button("Add Product")
@@ -491,9 +564,12 @@ def page_quote_builder():
         with c3:
             st.write(f"₹{row['price']:.2f}")
         with c4:
-            qty = st.number_input(f"Qty_{row['id']}", min_value=1,
-                                  max_value=int(row['stock']) if row['stock'] else 9999,
-                                  value=1, step=1, key=f"qty_{row['id']}")
+            qty = st.number_input(
+                f"Qty_{row['id']}",
+                min_value=1,
+                max_value=int(row['stock']) if row['stock'] else 9999,
+                value=1, step=1, key=f"qty_{row['id']}"
+            )
         with c5:
             if st.button("Add to Quote", key=f"add_{row['id']}"):
                 cart = st.session_state.quote_cart
@@ -558,11 +634,16 @@ def page_quote_builder():
                 st.download_button("⬇️ Download Excel", f, file_name=f"{qno}.xlsx")
 
     st.markdown("#### 🗑 Manage Cart")
-    rm_skus = st.multiselect("Remove items from cart", [f"{r['sku']} - {r['name']}" for r in st.session_state.quote_cart])
+    rm_skus = st.multiselect(
+        "Remove items from cart",
+        [f"{r['sku']} - {r['name']}" for r in st.session_state.quote_cart]
+    )
     if st.button("Remove Selected"):
         if rm_skus:
-            st.session_state.quote_cart = [r for r in st.session_state.quote_cart
-                                           if f"{r['sku']} - {r['name']}" not in rm_skus]
+            st.session_state.quote_cart = [
+                r for r in st.session_state.quote_cart
+                if f"{r['sku']} - {r['name']}" not in rm_skus
+            ]
             st.success("Removed selected items.")
 
 def page_quotes_history():
@@ -573,20 +654,11 @@ def page_quotes_history():
         return
     st.dataframe(q, use_container_width=True)
 
-# =====================================
+# -----------------------------
 # Router
-# =====================================
-def page_dashboard():
-    # already defined above but name conflict; keep same body
-    pass
-
-# Replace the pass with actual function body
-# (We defined page_dashboard earlier; keep the correct reference:)
+# -----------------------------
 if choice == "Dashboard":
-    # reuse the earlier definition (the first page_dashboard)
-    globals()["page_dashboard"] = globals().get("page_dashboard", None) or (lambda: None)
-    # call the real one defined above (first one)
-    [f for f in globals().values() if callable(f) and f.__name__ == "page_dashboard"][0]()
+    page_dashboard()
 elif choice == "View Stock":
     page_view_stock()
 elif choice == "Add Stock":
