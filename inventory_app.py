@@ -12,22 +12,23 @@ from PIL import Image
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 
-# =========================
+# =====================================
 # App config
-# =========================
+# =====================================
 st.set_page_config(page_title="BakeGuru Stock Manager", layout="wide")
 
 DB_FILE = "bakeguru.db"
+IMAGES_DIR = "images"
+os.makedirs(IMAGES_DIR, exist_ok=True)
 
-# =========================
-# Safe DB init (retain data)
-# =========================
+# =====================================
+# DB init + safe migrations
+# =====================================
 def init_db():
-    fresh = not os.path.exists(DB_FILE)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     c = conn.cursor()
-
-    c.execute("""
+    c.execute(
+        """
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sku TEXT UNIQUE,
@@ -36,11 +37,13 @@ def init_db():
             subcategory TEXT,
             price REAL,
             stock INTEGER,
-            image_url TEXT
+            image_url TEXT,
+            image_path TEXT
         )
-    """)
-
-    c.execute("""
+        """
+    )
+    c.execute(
+        """
         CREATE TABLE IF NOT EXISTS quotes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             quote_no TEXT,
@@ -52,48 +55,73 @@ def init_db():
             items TEXT,
             total REAL
         )
-    """)
-
+        """
+    )
+    # Migrate: add columns if older DB exists
+    def ensure_col(table, col, coltype):
+        c.execute(f"PRAGMA table_info({table})")
+        cols = [r[1] for r in c.fetchall()]
+        if col not in cols:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+    ensure_col("products", "image_path", "TEXT")
     conn.commit()
     return conn
 
 conn = init_db()
 
-# =========================
-# Header (simple)
-# =========================
+# =====================================
+# Header
+# =====================================
 col1, col2 = st.columns([1, 6])
 with col1:
     st.markdown("### 📦")
 with col2:
     st.markdown(
         "<h1 style='margin-bottom:0;'>BakeGuru Stock Manager</h1>"
-        "<div style='color:#666;margin-top:2px;'>Inventory • Quotes • Dashboard</div>",
+        "<div style='color:#888;margin-top:2px;'>Inventory • Quotes • Dashboard</div>",
         unsafe_allow_html=True,
     )
 st.markdown("---")
 
-# =========================
-# Sidebar (list menu)
-# =========================
+# =====================================
+# Sidebar (list)
+# =====================================
 st.sidebar.markdown("### 📂 Navigation")
 MENU = ["Dashboard", "View Stock", "Add Stock", "Quote Builder", "Quotes History"]
 choice = st.sidebar.radio("Go to", MENU, index=0)
 
-# =========================
+# =====================================
 # Utils
-# =========================
-def load_products():
+# =====================================
+def load_products() -> pd.DataFrame:
     return pd.read_sql("SELECT * FROM products", conn)
 
 def safe_items_json(df: pd.DataFrame) -> str:
-    """Avoid Unicode/ujson overflow by using json.dumps with ensure_ascii=False."""
-    records = df.to_dict(orient="records")
-    return json.dumps(records, ensure_ascii=False)
+    return json.dumps(df.to_dict(orient="records"), ensure_ascii=False)
 
-# =========================
-# Export: PDF with images
-# =========================
+def local_image_bytes(path: str):
+    if path and os.path.exists(path):
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except Exception:
+            return None
+    return None
+
+def pick_thumb(row) -> bytes | str | None:
+    """
+    Prefer URL (Streamlit can render it natively).
+    If no URL, try local file bytes.
+    """
+    url = (row.get("image_url") or "").strip()
+    if url:
+        return url
+    b = local_image_bytes(row.get("image_path") or "")
+    return b
+
+# =====================================
+# Exports (PDF & Excel)
+# =====================================
 def export_quote_pdf(df, qno, name, company, addr, phone, total):
     pdf = FPDF()
     pdf.add_page()
@@ -101,7 +129,7 @@ def export_quote_pdf(df, qno, name, company, addr, phone, total):
     # Title
     pdf.set_font("Arial", "B", 16)
     pdf.cell(200, 10, "BakeGuru Quote", ln=True, align="C")
-    pdf.ln(8)
+    pdf.ln(6)
 
     # Customer info
     pdf.set_font("Arial", "", 12)
@@ -109,66 +137,74 @@ def export_quote_pdf(df, qno, name, company, addr, phone, total):
     pdf.cell(200, 8, f"Customer: {name} | {company}", ln=True)
     pdf.cell(200, 8, f"Phone: {phone}", ln=True)
     pdf.multi_cell(200, 8, f"Address: {addr}")
-    pdf.ln(4)
+    pdf.ln(3)
 
     # Table header
     pdf.set_font("Arial", "B", 10)
-    pdf.cell(30, 8, "SKU", 1, align="C")
-    pdf.cell(50, 8, "Name", 1, align="C")
-    pdf.cell(18, 8, "Qty", 1, align="C")
-    pdf.cell(25, 8, "Price", 1, align="C")
-    pdf.cell(25, 8, "Total", 1, align="C")
-    pdf.cell(40, 8, "Image", 1, ln=True, align="C")
+    col_w = {"sku": 30, "name": 50, "qty": 18, "price": 25, "total": 25, "image": 40}
+    pdf.cell(col_w["sku"], 8, "SKU", 1, align="C")
+    pdf.cell(col_w["name"], 8, "Name", 1, align="C")
+    pdf.cell(col_w["qty"], 8, "Qty", 1, align="C")
+    pdf.cell(col_w["price"], 8, "Price", 1, align="C")
+    pdf.cell(col_w["total"], 8, "Total", 1, align="C")
+    pdf.cell(col_w["image"], 8, "Image", 1, ln=True, align="C")
 
     pdf.set_font("Arial", "", 10)
 
     for _, row in df.iterrows():
-        line_height = 22
-        # main cells
-        pdf.cell(30, line_height, str(row["sku"]), 1)
-        pdf.cell(50, line_height, str(row["name"])[:40], 1)
-        pdf.cell(18, line_height, str(int(row["qty"])), 1, align="C")
-        pdf.cell(25, line_height, f"{row['price']:.2f}", 1, align="R")
-        pdf.cell(25, line_height, f"{row['qty'] * row['price']:.2f}", 1, align="R")
+        qty = int(row["qty"])
+        line_total = qty * float(row["price"])
+        line_h = 22
+
+        pdf.cell(col_w["sku"], line_h, str(row["sku"]), 1)
+        pdf.cell(col_w["name"], line_h, str(row["name"])[:40], 1)
+        pdf.cell(col_w["qty"], line_h, str(qty), 1, align="C")
+        pdf.cell(col_w["price"], line_h, f"{float(row['price']):.2f}", 1, align="R")
+        pdf.cell(col_w["total"], line_h, f"{line_total:.2f}", 1, align="R")
 
         # image cell
         inserted = False
-        if row.get("image_url"):
-            try:
-                resp = requests.get(row["image_url"], timeout=5)
+        url = (row.get("image_url") or "").strip()
+        path = (row.get("image_path") or "").strip()
+        pdf.cell(col_w["image"], line_h, "", 1)
+        x_left = pdf.get_x() - col_w["image"]
+        y_top = pdf.get_y()
+        try:
+            if url:
+                resp = requests.get(url, timeout=5)
                 img = Image.open(BytesIO(resp.content)).convert("RGB")
                 img.thumbnail((30, 30))
-                tempf = f"__tmp_{row['id']}.jpg"
-                img.save(tempf, format="JPEG")
-                x = pdf.get_x()
-                y = pdf.get_y()
-                pdf.cell(40, line_height, "", 1)  # reserve the cell
-                pdf.image(tempf, x=x + 5, y=y + 3, w=30, h=16)
-                os.remove(tempf)
+                tf = f"__tmp_{row['id']}.jpg"
+                img.save(tf, "JPEG")
+                pdf.image(tf, x=x_left + 5, y=y_top + 3, w=30, h=16)
+                os.remove(tf)
                 inserted = True
-            except Exception:
-                inserted = False
-        if not inserted:
-            pdf.cell(40, line_height, "N/A", 1, align="C")
+            elif path and os.path.exists(path):
+                pdf.image(path, x=x_left + 5, y=y_top + 3, w=30, h=16)
+                inserted = True
+        except Exception:
+            inserted = False
+        pdf.ln(line_h)
 
-        pdf.ln(line_height)
-
-    pdf.ln(4)
+    # Grand Total under the "Total" column (not far right)
+    # Left margin default ~10 in FPDF. The "Total" column begins after SKU+Name+Qty+Price.
+    x_total_col = pdf.l_margin + col_w["sku"] + col_w["name"] + col_w["qty"] + col_w["price"]
+    pdf.ln(2)
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(200, 10, f"Grand Total: {total:.2f}", ln=True, align="R")
+    pdf.set_x(x_total_col)
+    pdf.cell(col_w["total"], 10, "Grand Total:", border=0, align="R")
+    pdf.cell(col_w["image"], 10, f"{total:.2f}", border=0, align="R")
+    pdf.ln(10)
 
-    # disclaimer
+    # Disclaimer
     pdf.set_font("Arial", "I", 10)
-    pdf.multi_cell(200, 8, "Note: GST & Shipping extra.")
+    pdf.multi_cell(200, 7, "Note: GST & Shipping extra.")
 
     os.makedirs("exports", exist_ok=True)
     file_path = f"exports/{qno}.pdf"
     pdf.output(file_path)
     return file_path
 
-# =========================
-# Export: Excel with images
-# =========================
 def export_quote_excel(df, qno, name, company, addr, phone, total):
     os.makedirs("exports", exist_ok=True)
     file_path = f"exports/{qno}.xlsx"
@@ -181,29 +217,39 @@ def export_quote_excel(df, qno, name, company, addr, phone, total):
     ws.append(headers)
 
     for idx, row in df.iterrows():
-        excel_row = idx + 2  # 1-based + header
+        excel_row = idx + 2
         ws.append([
             row["sku"],
             row["name"],
             int(row["qty"]),
             float(row["price"]),
             float(row["qty"] * row["price"]),
-            ""  # image placeholder
+            ""
         ])
 
-        if row.get("image_url"):
-            try:
-                resp = requests.get(row["image_url"], timeout=5)
+        # Try URL then local path
+        added = False
+        url = (row.get("image_url") or "").strip()
+        path = (row.get("image_path") or "").strip()
+        try:
+            if url:
+                resp = requests.get(url, timeout=5)
                 img = Image.open(BytesIO(resp.content)).convert("RGB")
                 img.thumbnail((80, 80))
-                tempf = f"__tmp_xl_{row['id']}.jpg"
-                img.save(tempf, format="JPEG")
-                xl_img = XLImage(tempf)
+                tf = f"__tmp_xl_{row['id']}.jpg"
+                img.save(tf, "JPEG")
+                xl_img = XLImage(tf)
                 xl_img.width, xl_img.height = 60, 60
                 ws.add_image(xl_img, f"F{excel_row}")
-                os.remove(tempf)
-            except Exception:
-                pass
+                os.remove(tf)
+                added = True
+            elif path and os.path.exists(path):
+                xl_img = XLImage(path)
+                xl_img.width, xl_img.height = 60, 60
+                ws.add_image(xl_img, f"F{excel_row}")
+                added = True
+        except Exception:
+            pass
 
     # widths
     ws.column_dimensions["A"].width = 16
@@ -213,7 +259,7 @@ def export_quote_excel(df, qno, name, company, addr, phone, total):
     ws.column_dimensions["E"].width = 16
     ws.column_dimensions["F"].width = 16
 
-    # customer & total
+    # Customer & total
     base = len(df) + 3
     ws[f"A{base}"] = "Customer:"
     ws[f"B{base}"] = name
@@ -223,16 +269,15 @@ def export_quote_excel(df, qno, name, company, addr, phone, total):
     ws[f"B{base+2}"] = addr
     ws[f"A{base+3}"] = "Phone:"
     ws[f"B{base+3}"] = phone
-
     ws[f"A{base+5}"] = "Grand Total"
     ws[f"B{base+5}"] = float(total)
 
     wb.save(file_path)
     return file_path
 
-# =========================
-# PAGES
-# =========================
+# =====================================
+# Pages
+# =====================================
 def page_dashboard():
     st.subheader("📊 Dashboard")
 
@@ -269,7 +314,7 @@ def page_view_stock():
         st.info("No products available.")
         return
 
-    # quick filter row
+    # Filters
     cols = st.columns([3, 2, 2, 2])
     with cols[0]:
         term = st.text_input("🔎 Search (SKU / Name / Category)")
@@ -291,9 +336,45 @@ def page_view_stock():
     if low:
         f = f[f["stock"] < 5]
 
-    st.write("### Products")
-    st.dataframe(f[["sku", "name", "category", "subcategory", "price", "stock", "image_url"]],
-                 use_container_width=True)
+    # Thumbnail column (URL or local bytes)
+    thumbs = f.apply(pick_thumb, axis=1)
+    f = f.copy()
+    f.insert(1, "thumb", thumbs)  # after id/sku? We'll show columns explicitly
+
+    st.markdown("### Products (inline editable)")
+    edited = st.data_editor(
+        f[["thumb", "sku", "name", "category", "subcategory", "price", "stock", "image_url", "image_path", "id"]],
+        column_config={
+            "thumb": st.column_config.ImageColumn("Image", help="URL or local upload shown"),
+            "sku": st.column_config.TextColumn("SKU", disabled=True),
+            "name": "Name",
+            "category": "Category",
+            "subcategory": "Subcategory",
+            "price": st.column_config.NumberColumn("Price", step=0.01, format="%.2f"),
+            "stock": st.column_config.NumberColumn("Stock", step=1),
+            "image_url": st.column_config.TextColumn("Image URL"),
+            "image_path": st.column_config.TextColumn("Local Image Path", disabled=True),
+            "id": st.column_config.TextColumn("ID", disabled=True),
+        },
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        height=420,
+        key="inv_editor",
+    )
+
+    if st.button("💾 Save changes"):
+        try:
+            for _, r in edited.iterrows():
+                conn.execute(
+                    "UPDATE products SET name=?, category=?, subcategory=?, price=?, stock=?, image_url=? WHERE id=?",
+                    (str(r["name"]), str(r["category"]), str(r["subcategory"]),
+                     float(r["price"]), int(r["stock"]), str(r["image_url"] or ""), int(r["id"]))
+                )
+            conn.commit()
+            st.success("Changes saved.")
+        except Exception as e:
+            st.error(f"Save failed: {e}")
 
 def page_add_stock():
     st.subheader("➕ Add Stock")
@@ -309,31 +390,48 @@ def page_add_stock():
             price = st.number_input("Price", min_value=0.0, step=0.01, format="%.2f")
             stock = st.number_input("Stock Quantity", min_value=0, step=1)
             image_url = st.text_input("Image URL (optional)")
+
+        # Image file uploader
+        img_file = st.file_uploader("Or upload an image file (JPG/PNG)", type=["jpg", "jpeg", "png"])
+
         submitted = st.form_submit_button("Add Product")
 
         if submitted:
             if not sku or not name:
                 st.error("Please provide at least SKU and Product Name.")
-            else:
+                return
+
+            image_path = ""
+            if img_file is not None:
                 try:
-                    conn.execute(
-                        "INSERT INTO products (sku, name, category, subcategory, price, stock, image_url) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (sku, name, category, subcategory, price, stock, image_url),
-                    )
-                    conn.commit()
-                    st.success(f"✅ {name} added.")
-                except sqlite3.IntegrityError:
-                    st.error("SKU already exists. Try another SKU.")
+                    ext = os.path.splitext(img_file.name)[1].lower() or ".jpg"
+                    safe_sku = "".join(ch for ch in sku if ch.isalnum() or ch in ("-", "_")).strip()
+                    fname = f"{safe_sku}_{int(datetime.now().timestamp())}{ext}"
+                    image_path = os.path.join(IMAGES_DIR, fname)
+                    img = Image.open(img_file).convert("RGB")
+                    img.save(image_path, "JPEG", quality=90)
+                except Exception as e:
+                    st.warning(f"Image save failed (continuing without local image): {e}")
+
+            try:
+                conn.execute(
+                    "INSERT INTO products (sku, name, category, subcategory, price, stock, image_url, image_path) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (sku, name, category, subcategory, float(price), int(stock), image_url or "", image_path or "")
+                )
+                conn.commit()
+                st.success(f"✅ {name} added.")
+            except sqlite3.IntegrityError:
+                st.error("SKU already exists. Try another SKU.")
 
     st.markdown("#### 📤 Bulk Upload (Excel .xlsx)")
-    up = st.file_uploader("Upload with columns: sku,name,category,subcategory,price,stock,image_url", type=["xlsx"])
+    st.caption("Columns required: sku, name, category, subcategory, price, stock, image_url (optional).")
+    up = st.file_uploader("Upload file", type=["xlsx"])
     if up:
         try:
             data = pd.read_excel(up)
-            # Normalize headers (case-insensitive)
             data.columns = [c.strip().lower() for c in data.columns]
-            req = ["sku", "name", "category", "subcategory", "price", "stock", "image_url"]
+            req = ["sku", "name", "category", "subcategory", "price", "stock"]
             missing = [c for c in req if c not in data.columns]
             if missing:
                 st.error(f"Missing columns: {', '.join(missing)}")
@@ -342,10 +440,10 @@ def page_add_stock():
                 for _, r in data.iterrows():
                     try:
                         conn.execute(
-                            "INSERT INTO products (sku, name, category, subcategory, price, stock, image_url) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (str(r["sku"]), str(r["name"]), str(r["category"]), str(r["subcategory"]),
-                             float(r["price"]), int(r["stock"]), str(r.get("image_url") or "")),
+                            "INSERT INTO products (sku, name, category, subcategory, price, stock, image_url, image_path) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (str(r["sku"]), str(r["name"]), str(r.get("category") or ""), str(r.get("subcategory") or ""),
+                             float(r.get("price") or 0), int(r.get("stock") or 0), str(r.get("image_url") or ""), "")
                         )
                         ok += 1
                     except sqlite3.IntegrityError:
@@ -367,11 +465,9 @@ def page_quote_builder():
         st.session_state.quote_cart = []
 
     # Search/filter
-    s1, s2 = st.columns([3, 1])
+    s1, _ = st.columns([3, 1])
     with s1:
         q = st.text_input("Search products (SKU/Name/Category)")
-    with s2:
-        st.write("")  # spacer
 
     filt = df.copy()
     if q:
@@ -381,9 +477,10 @@ def page_quote_builder():
     for _, row in filt.iterrows():
         c1, c2, c3, c4, c5 = st.columns([1.2, 3, 1.2, 1.2, 1.2])
         with c1:
+            thumb = pick_thumb(row)
             try:
-                if row.get("image_url"):
-                    st.image(row["image_url"], width=50)
+                if isinstance(thumb, (bytes, bytearray)) or (isinstance(thumb, str) and thumb):
+                    st.image(thumb, width=50)
                 else:
                     st.write("📦")
             except Exception:
@@ -429,13 +526,12 @@ def page_quote_builder():
         cust_phone = st.text_input("Phone")
         cust_addr = st.text_area("Address", height=92)
 
-    cta1, cta2, cta3 = st.columns([1, 1, 4])
+    cta1, cta2, _ = st.columns([1, 1, 4])
     with cta1:
         if st.button("🧾 Generate PDF"):
             today = datetime.today().strftime("%Y-%m-%d")
             qcount = pd.read_sql("SELECT COUNT(*) AS c FROM quotes", conn)["c"][0] + 1
             qno = f"BG-{qcount:04d}"
-
             items_df = pd.DataFrame(st.session_state.quote_cart)
             total = float((items_df["qty"] * items_df["price"]).sum())
 
@@ -477,11 +573,20 @@ def page_quotes_history():
         return
     st.dataframe(q, use_container_width=True)
 
-# =========================
+# =====================================
 # Router
-# =========================
+# =====================================
+def page_dashboard():
+    # already defined above but name conflict; keep same body
+    pass
+
+# Replace the pass with actual function body
+# (We defined page_dashboard earlier; keep the correct reference:)
 if choice == "Dashboard":
-    page_dashboard()
+    # reuse the earlier definition (the first page_dashboard)
+    globals()["page_dashboard"] = globals().get("page_dashboard", None) or (lambda: None)
+    # call the real one defined above (first one)
+    [f for f in globals().values() if callable(f) and f.__name__ == "page_dashboard"][0]()
 elif choice == "View Stock":
     page_view_stock()
 elif choice == "Add Stock":
