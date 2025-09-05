@@ -126,8 +126,69 @@ def _pil_to_data_url(img: Image.Image, ext: str = "JPEG") -> str:
     return f"data:{mime};base64,{b64}"
 
 
+# new: generate thumbnail from local file path
+def ensure_thumb_from_path(path: str, key: str, size=(120, 120), refresh: bool = False) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        if not path or not os.path.exists(path):
+            return None, None
+        url_hash = hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
+        thumb_name = f"{key}_{url_hash}_pthumb"
+        cache_path = os.path.join(THUMB_DIR, f"{thumb_name}.jpg")
+        if (not refresh) and os.path.exists(cache_path):
+            try:
+                with Image.open(cache_path) as im:
+                    im.load()
+                    return _pil_to_data_url(im, "JPEG"), cache_path
+            except Exception:
+                try:
+                    os.remove(cache_path)
+                except Exception:
+                    logger.warning("Failed to remove corrupted cache %s", cache_path)
+        with Image.open(path) as im:
+            im.thumbnail(size)
+            im.convert("RGB").save(cache_path, format="JPEG", quality=85)
+        with Image.open(cache_path) as im2:
+            return _pil_to_data_url(im2, "JPEG"), cache_path
+    except Exception as e:
+        logger.exception("ensure_thumb_from_path failed for %s: %s", path, e)
+        return None, None
+
+
+# new: save uploaded image to IMG_DIR and return saved path
+def save_uploaded_image(upload, sku: str) -> Optional[str]:
+    try:
+        if upload is None:
+            return None
+        allowed = {".jpg", ".jpeg", ".png", ".webp"}
+        ext = os.path.splitext(upload.name)[1].lower() or ".jpg"
+        if ext not in allowed:
+            logger.warning("Uploaded file has disallowed extension: %s", ext)
+            return None
+        buf = upload.getbuffer()
+        if len(buf) > 5 * 1024 * 1024:  # 5 MB limit
+            logger.warning("Uploaded file too large: %s bytes", len(buf))
+            return None
+        safe = "".join(c for c in (sku or "") if c.isalnum() or c in ("-","_")) or hashlib.sha1(upload.name.encode()).hexdigest()[:8]
+        fpath = os.path.join(IMG_DIR, f"{safe}{ext}")
+        with open(fpath, "wb") as f:
+            f.write(buf)
+        return fpath
+    except Exception as e:
+        logger.exception("save_uploaded_image failed: %s", e)
+        return None
+
+
+# replace existing ensure_thumb_from_url with one that handles local paths too
 def ensure_thumb_from_url(url: str, key: str, size=(120, 120), refresh: bool = False) -> Tuple[Optional[str], Optional[str]]:
     try:
+        if not url:
+            return None, None
+        # handle file:// or absolute/local path
+        if url.startswith("file://"):
+            return ensure_thumb_from_path(url[7:], key, size=size, refresh=refresh)
+        if os.path.exists(url):
+            return ensure_thumb_from_path(url, key, size=size, refresh=refresh)
+
         url_hash = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
         thumb_name = f"{key}_{url_hash}_urlthumb"
         cache_path = os.path.join(THUMB_DIR, f"{thumb_name}.jpg")
@@ -138,7 +199,6 @@ def ensure_thumb_from_url(url: str, key: str, size=(120, 120), refresh: bool = F
                     im.load()
                     return _pil_to_data_url(im, "JPEG"), cache_path
             except Exception:
-                # corrupted cache -> remove and continue
                 try:
                     os.remove(cache_path)
                 except Exception:
@@ -152,7 +212,8 @@ def ensure_thumb_from_url(url: str, key: str, size=(120, 120), refresh: bool = F
                 with Image.open(io.BytesIO(r.content)) as im:
                     im.thumbnail(size)
                     im.convert("RGB").save(cache_path, format="JPEG", quality=85)
-                    return _pil_to_data_url(im, "JPEG"), cache_path
+                with Image.open(cache_path) as im2:
+                    return _pil_to_data_url(im2, "JPEG"), cache_path
             except Exception as e:
                 last_err = e
                 logger.debug("Attempt %d failed for %s: %s", attempt + 1, url, e)
@@ -371,7 +432,8 @@ def page_add_stock():
 
         c6, c7 = st.columns([2, 1])
         with c6:
-            image_url = st.text_input("Image URL", placeholder="https://...")
+            image_url = st.text_input("Image URL (optional)", placeholder="https://...")
+            upload = st.file_uploader("Upload image (optional)", type=["png","jpg","jpeg","webp"], accept_multiple_files=False, key="add_stock_upload")
         with c7:
             stock = st.number_input("Stock", min_value=0, step=1)
 
@@ -381,6 +443,17 @@ def page_add_stock():
         if not sku or not name:
             st.error("SKU and Name are required")
             return
+
+        # save uploaded image if provided
+        saved_path = None
+        if upload is not None:
+            saved_path = save_uploaded_image(upload, sku.strip())
+            if saved_path:
+                image_url_final = saved_path
+            else:
+                image_url_final = (image_url.strip() if image_url else None)
+        else:
+            image_url_final = (image_url.strip() if image_url else None)
 
         exec_sql(
             """
@@ -394,8 +467,16 @@ def page_add_stock():
               image_url=excluded.image_url,
               stock=excluded.stock
             """,
-            (sku.strip(), name.strip(), category.strip(), subcategory.strip(), float(price), image_url.strip(), int(stock))
+            (sku.strip(), name.strip(), category.strip(), subcategory.strip(), float(price), image_url_final, int(stock))
         )
+
+        # best-effort: create thumbnail immediately for the saved path or URL
+        try:
+            if image_url_final:
+                ensure_thumb_from_url(image_url_final, sku.strip(), refresh=True)
+        except Exception:
+            logger.exception("Thumbnail generation failed after saving product %s", sku)
+
         st.success("Product saved.")
 
 
