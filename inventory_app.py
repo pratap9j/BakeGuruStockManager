@@ -15,6 +15,7 @@ import requests
 import streamlit as st
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
+import logging
 
 # =============================
 # App Constants & Paths
@@ -36,6 +37,10 @@ os.makedirs(THUMB_DIR, exist_ok=True)
 # =============================
 _db_lock = threading.Lock()
 
+# add logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 @contextmanager
 def db_conn(readonly: bool = False):
     abs_db = os.path.abspath(DB_PATH)
@@ -45,6 +50,7 @@ def db_conn(readonly: bool = False):
         con.execute("PRAGMA journal_mode=WAL;")
         con.execute("PRAGMA busy_timeout=30000;")
         con.execute("PRAGMA synchronous=NORMAL;")
+        con.execute("PRAGMA foreign_keys=ON;")   # ensure FK enforcement
         yield con
     finally:
         con.close()
@@ -127,23 +133,33 @@ def ensure_thumb_from_url(url: str, key: str, size=(120, 120), refresh: bool = F
         cache_path = os.path.join(THUMB_DIR, f"{thumb_name}.jpg")
 
         if (not refresh) and os.path.exists(cache_path):
-            im = Image.open(cache_path)
-            return _pil_to_data_url(im, "JPEG"), cache_path
+            try:
+                with Image.open(cache_path) as im:
+                    im.load()
+                    return _pil_to_data_url(im, "JPEG"), cache_path
+            except Exception:
+                # corrupted cache -> remove and continue
+                try:
+                    os.remove(cache_path)
+                except Exception:
+                    logger.warning("Failed to remove corrupted cache %s", cache_path)
 
         last_err = None
         for attempt in range(3):
             try:
                 r = requests.get(url, timeout=10)
                 r.raise_for_status()
-                im = Image.open(io.BytesIO(r.content))
-                im.thumbnail(size)
-                im.convert("RGB").save(cache_path, format="JPEG", quality=85)
-                return _pil_to_data_url(im, "JPEG"), cache_path
+                with Image.open(io.BytesIO(r.content)) as im:
+                    im.thumbnail(size)
+                    im.convert("RGB").save(cache_path, format="JPEG", quality=85)
+                    return _pil_to_data_url(im, "JPEG"), cache_path
             except Exception as e:
                 last_err = e
+                logger.debug("Attempt %d failed for %s: %s", attempt + 1, url, e)
                 time.sleep(0.4 * (attempt + 1))
         raise last_err if last_err else RuntimeError("unknown fetch error")
-    except Exception:
+    except Exception as e:
+        logger.exception("ensure_thumb_from_url failed for %s: %s", url, e)
         return None, None
 
 
@@ -240,142 +256,6 @@ def render_quote_pdf(meta: dict, items: pd.DataFrame) -> bytes:
     pdf.cell(0, 7, "Prices are exclusive of taxes, unless specified.")
 
     return _pdf_output_bytes(pdf)
-
-# =============================
-# Streamlit UI
-# =============================
-st.set_page_config(page_title=APP_TITLE, page_icon="📦", layout="wide")
-st.title(APP_TITLE)
-
-if "draft_cart" not in st.session_state:
-    st.session_state["draft_cart"] = pd.DataFrame(columns=["sku","name","price","qty","image_url","thumb_path"])
-
-# Sidebar
-with st.sidebar:
-    choice = st.radio(
-        "Go to",
-        [
-            "Dashboard",
-            "View Stock",
-            "Add Stock",
-            "Quote Builder",
-            "Quotes History",
-            "Diagnostics",
-        ],
-        index=1,
-    )
-
-# Dashboard
-def page_dashboard():
-    st.subheader("Dashboard")
-    st.write("Welcome to BakeGuru Stock Manager!")
-
-# View Stock
-def page_view_stock():
-    df = query_df("SELECT sku, name, category, subcategory, price, image_url, stock FROM products ORDER BY name")
-
-    colr1, colr2 = st.columns([1, 3])
-    with colr1:
-        refresh_thumbs = st.button("🔄 Refresh thumbs", key="refresh_thumbs_viewstock")
-    with colr2:
-        st.caption("Tip: tick rows and click 'Add to Draft' to build a quote.")
-
-    thumb_dataurls, thumb_paths = [], []
-    for _, r in df.iterrows():
-        sku = (r["sku"] or "").strip() or hashlib.sha1(str(r.to_dict()).encode()).hexdigest()[:10]
-        durl, fpath = (None, None)
-        url = (r["image_url"] or "").strip()
-        if url:
-            durl, fpath = ensure_thumb_from_url(url, sku, refresh=refresh_thumbs)
-        thumb_dataurls.append(durl)
-        thumb_paths.append(fpath)
-    df.insert(1, "thumb", thumb_dataurls)
-    df.insert(2, "thumb_path", thumb_paths)
-    df.insert(0, "select", False)
-
-    edited = st.data_editor(
-        df[["select","thumb","sku","name","category","subcategory","price","stock","image_url"]],
-        column_config={
-            "select": st.column_config.CheckboxColumn("✓"),
-            "thumb": st.column_config.ImageColumn("Img", width="small"),
-            "sku": st.column_config.TextColumn("SKU", width="small"),
-            "name": st.column_config.TextColumn("Name", width="medium"),
-            "category": st.column_config.TextColumn("Cat", width="small"),
-            "subcategory": st.column_config.TextColumn("Subcat", width="small"),
-            "price": st.column_config.NumberColumn("Price", format="₹%.2f", width="small"),
-            "stock": st.column_config.NumberColumn("Stock", width="small"),
-            "image_url": st.column_config.TextColumn("Image URL", width="medium"),
-        },
-        hide_index=True,
-        num_rows="dynamic",
-        width="stretch",
-        key="viewstock_editor",
-    )
-
-    cA, cB = st.columns([1, 1])
-    with cA:
-        if st.button("➕ Add to Draft Quote", key="add_to_draft_viewstock"):
-            sel = edited[edited["select"] == True]
-            if sel.empty:
-                st.info("No rows selected.")
-            else:
-                draft_prev = st.session_state.get("draft_cart", pd.DataFrame(columns=["sku","name","price","qty","image_url","thumb_path"]))
-                add = sel[["sku","name","price","image_url","thumb_path"]].copy()
-                add["qty"] = 1
-                combined = pd.concat([draft_prev, add], ignore_index=True)
-                combined = combined.groupby(["sku","name","price","image_url","thumb_path"], dropna=False, as_index=False)["qty"].sum()
-                st.session_state["draft_cart"] = combined
-                st.success(f"Added {len(sel)} item(s) to draft.")
-    with cB:
-        if st.button("💾 Save Changes", key="save_changes_viewstock"):
-            for _, r in edited.iterrows():
-                exec_sql(
-                    """
-                    UPDATE products SET name=?, category=?, subcategory=?, price=?, stock=?, image_url=? WHERE sku=?
-                    """,
-                    (r["name"], r["category"], r["subcategory"], float(r["price"] or 0), int(r["stock"] or 0), (r["image_url"] or None), r["sku"]),
-                )
-            st.success("Changes saved.")
-
-# Add Stock
-def page_add_stock():
-    st.subheader("Add Stock")
-    with st.form("add_form"):
-        sku = st.text_input("SKU")
-        name = st.text_input("Name")
-        cat = st.text_input("Category")
-        subcat = st.text_input("Subcategory")
-        price = st.number_input("Price", min_value=0.0, step=0.5)
-        stock = st.number_input("Stock", min_value=0, step=1)
-        image_url = st.text_input("Image URL")
-        if st.form_submit_button("Add"):
-            exec_sql(
-                "INSERT OR REPLACE INTO products (sku,name,category,subcategory,price,image_url,stock) VALUES (?,?,?,?,?,?,?)",
-                (sku, name, cat, subcat, float(price), image_url, int(stock)),
-            )
-            st.success("Product added/updated.")
-
-# Quote Builder
-def page_quote_builder():
-    st.subheader("Quote Builder")
-    draft = st.session_state.get("draft_cart", pd.DataFrame(columns=["sku","name","price","qty","image_url","thumb_path"]))
-
-    if draft.empty:
-        st.info("No items in draft. Add from View Stock.")
-        return
-
-    show = draft.copy()
-    thumbs = []
-    for _, r in show.iterrows():
-        url = r.get("image_url") or ""
-        du, _ = (None, None)
-        if url:
-            du, _ = ensure_thumb_from_url(url, r.get("sku","preview"))
-        thumbs.append(du)
-    show.insert(0, "thumb", thumbs)
-
-    cart = st.data_editor(
-        show[["thumb","sku","name","price","qty
 
 # =============================
 # Streamlit UI
